@@ -1,0 +1,13 @@
+/ebin
+/deps
+/cover
+/.erlang.mk
+/_rel
+/relx
+/elvis
+/erl_crash.dump
+*.d
+*.beam
+*.plt
+*.coverdata
+test/ct.cover.spec
