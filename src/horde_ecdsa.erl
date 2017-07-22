@@ -11,18 +11,20 @@
 	deserialize/3
 ]).
 
-init(#{hash_algo := _, curve := _} = Opts) -> Opts.
+init(#{hash_algo := _, curve := _, address_size := _} = Opts) -> Opts.
 
-info(#{hash_algo := HashAlgo}, max_address) ->
+info(#{hash_algo := HashAlgo, address_size := AddrSize}, max_address) ->
 	Hash = crypto:hash(HashAlgo, <<>>),
 	MaxHash = << <<255>> || <<_>> <= Hash>>,
-	crypto:bytes_to_integer(MaxHash).
+	<<MaxAddress:AddrSize, _/binary>> = MaxHash,
+	MaxAddress.
 
 generate_keypair(#{curve := Curve}) ->
 	crypto:generate_key(ecdh, Curve).
 
-address_of(#{hash_algo := HashAlgo}, PublicKey) ->
-	crypto:bytes_to_integer(crypto:hash(HashAlgo, PublicKey)).
+address_of(#{hash_algo := HashAlgo, address_size := AddrSize}, PublicKey) ->
+	<<Address:AddrSize, _/binary>> = crypto:hash(HashAlgo, PublicKey),
+	Address.
 
 sign(#{hash_algo := HashAlgo, curve := Curve}, Message, PrivKey) ->
 	crypto:sign(ecdsa, HashAlgo, Message, [PrivKey, Curve]).

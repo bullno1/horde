@@ -115,7 +115,11 @@
 default_realm() ->
 	#{
 		name => <<"horde">>,
-		crypto => {horde_ecdsa, #{hash_algo => sha, curve => secp521r1}}
+		crypto => {horde_ecdsa, #{
+			hash_algo => sha256,
+			address_size => 160,
+			curve => secp521r1
+		}}
 	}.
 
 -spec generate_keypair(realm()) -> horde_crypto:keypair().
