@@ -6,6 +6,7 @@
 /relx
 /elvis
 /erl_crash.dump
+/logs
 *.d
 *.beam
 *.plt
