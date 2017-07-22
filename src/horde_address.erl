@@ -19,5 +19,5 @@ is_between(Address, Lowerbound, Upperbound, LowerboundCheck, UpperboundCheck) ->
 			andalso UpperboundCheck(Address, Upperbound);
 		false ->
 			LowerboundCheck(Lowerbound, Address)
-			orelse Upperbound(Address, Upperbound)
+			orelse UpperboundCheck(Address, Upperbound)
 	end.

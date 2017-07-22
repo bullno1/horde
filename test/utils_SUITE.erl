@@ -2,7 +2,7 @@
 -compile(export_all).
 -include_lib("common_test/include/ct.hrl").
 
-all() -> [crypto].
+all() -> [crypto, address].
 
 init_per_suite(Config) ->
 	{ok, Apps} = application:ensure_all_started(horde),
@@ -41,5 +41,22 @@ crypto(_Config) ->
 	false = horde_crypto:verify(Crypto, Message, RandomSig2, PK),
 
 	PK = horde_crypto:deserialize(Crypto, key, horde_crypto:serialize(Crypto, key, PK)),
+
+	ok.
+
+address(_Config) ->
+	true = horde_address:is_between(6, 5, 10),
+	false = horde_address:is_between(5, 5, 10),
+	false = horde_address:is_between(4, 5, 10),
+	false = horde_address:is_between(10, 5, 10),
+	false = horde_address:is_between(11, 5, 10),
+
+	true = horde_address:is_between(11, 10, 5),
+	false = horde_address:is_between(10, 10, 5),
+	false = horde_address:is_between(9, 10, 5),
+	false = horde_address:is_between(6, 10, 5),
+
+	LTE = fun erlang:'=<'/2,
+	true = horde_address:is_between(5, 5, 10, LTE, LTE),
 
 	ok.
