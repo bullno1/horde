@@ -8,6 +8,7 @@
 	info/1,
 	info/2,
 	join/3,
+	join_async/2,
 	stop/1,
 	wait_join/2,
 	send_query/3
@@ -140,10 +141,16 @@ info(Ref) -> gen_server:call(Ref, info).
 
 -spec join(ref(), [endpoint()], timeout()) -> boolean().
 join(Ref, BootstrapNodes, Timeout) ->
-	gen_server:call(Ref, {join, BootstrapNodes}, Timeout).
+	join_async(Ref, BootstrapNodes),
+	wait_join(Ref, Timeout).
+
+-spec join_async(ref(), [endpoint()]) -> ok.
+join_async(Ref, BootstrapNodes) ->
+	gen_server:cast(Ref, {join, BootstrapNodes}).
 
 -spec wait_join(ref(), timeout()) -> boolean().
-wait_join(Ref, Timeout) -> gen_server:call(Ref, wait_join, Timeout).
+wait_join(Ref, Timeout) ->
+	gen_server:call(Ref, wait_join, Timeout).
 
 -spec send_query(ref(), endpoint(), message_body()) -> reference().
 send_query(Ref, Endpoint, Message) ->
@@ -204,18 +211,6 @@ init(#{
 handle_call(wait_join, From, State) ->
 	maybe_add_join_waiter(From, State);
 handle_call(
-	{join, BootstrapNodes}, From,
-	#state{status = standalone} = State
-) ->
-	case maybe_bootstrap(BootstrapNodes, State) of
-		{ok, State2} ->
-			maybe_add_join_waiter(From, State2);
-		{error, _} ->
-			{reply, false, State}
-	end;
-handle_call({join, _}, From, State) ->
-	maybe_add_join_waiter(From, State);
-handle_call(
 	{lookup, Address}, From,
 	#state{
 		address = OwnAddress,
@@ -238,6 +233,15 @@ handle_call({info, What}, _From, State) ->
 handle_call(info, _From, State) ->
 	{reply, extract_info(State), State}.
 
+handle_cast({join, BootstrapNodes}, #state{status = standalone} = State) ->
+	case maybe_bootstrap(BootstrapNodes, State) of
+		{ok, State2} ->
+			{noreply, State2};
+		{error, _} ->
+			{noreply, State}
+	end;
+handle_cast({join, _}, State) ->
+	{noreply, State};
 handle_cast(
 	{send_query, Ref, Sender, Endpoint, Message},
 	#state{
@@ -702,8 +706,18 @@ extract_info(What, State) ->
 readable_fields() ->
 	[status, transport, ring, successor, predecessor, address].
 
-maybe_add_join_waiter(Waiter, #state{join_waiters = Waiters} = State) ->
-	{noreply, State#state{join_waiters = [Waiter | Waiters]}}.
+maybe_add_join_waiter(
+	Waiter,
+	#state{status = Status, join_waiters = Waiters} = State
+) ->
+	case Status of
+		standalone ->
+			{reply, false, State};
+		ready ->
+			{reply, true, State};
+		_ ->
+			{noreply, State#state{join_waiters = [Waiter | Waiters]}}
+	end.
 
 -ifdef(TEST).
 start_timer(Timeout, Message) ->
