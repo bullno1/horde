@@ -2,7 +2,7 @@
 -compile(export_all).
 -include_lib("common_test/include/ct.hrl").
 
-all() -> [bootstrap].
+all() -> [bootstrap, no_self_join].
 
 init_per_suite(Config) ->
 	{ok, Apps} = application:ensure_all_started(horde),
@@ -21,6 +21,20 @@ end_per_testcase(_Testcase, _Config) ->
 	meck:unload([horde_mock]),
 	ok.
 
+no_self_join(_Config) ->
+	meck:expect(horde_mock, start_timer,
+		fun(_Timeout, Dest, Message) ->
+			erlang:start_timer(0, Dest, Message)
+		end
+	),
+	meck:expect(horde_mock, cancel_timer, fun erlang:cancel_timer/1),
+
+	{ok, Node} = create_node(),
+	Transport = horde:info(Node, transport),
+	TransportAddress = horde_transport:info(Transport, address),
+	false = horde:join(Node, [{transport, TransportAddress}], infinity),
+	horde:stop(Node).
+
 bootstrap(_Config) ->
 	meck:expect(horde_mock, start_timer,
 		fun(_Timeout, Dest, Message) ->
@@ -32,7 +46,7 @@ bootstrap(_Config) ->
 	{ok, BootstrapNode} = create_node(),
 	Transport = horde:info(BootstrapNode, transport),
 	BootstrapAddress = horde_transport:info(Transport, address),
-	NumNodes = 16,
+	NumNodes = 32,
 	BootstrapNodes = [{transport, BootstrapAddress}],
 	Nodes = lists:map(
 		fun(_) ->
