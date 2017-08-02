@@ -14,8 +14,7 @@ end_per_suite(Config) ->
 	ok.
 
 crypto(_Config) ->
-	{CryptoMod, CryptoOpts} = horde_crypto:default(),
-	Crypto = horde_crypto:init(CryptoMod, CryptoOpts),
+	Crypto = horde_crypto:default(),
 	{PK, SK} = horde_crypto:generate_keypair(Crypto),
 
 	Address = horde_crypto:address_of(Crypto, PK),

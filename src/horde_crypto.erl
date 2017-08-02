@@ -59,11 +59,13 @@
 
 -spec default() -> {module(), term()}.
 default() ->
-	{horde_ecdsa, #{
+	CryptoMod = horde_ecdsa,
+	CryptoOpts = #{
 		hash_algo => sha256,
 		curve => secp384r1,
 		address_size => 160
-	}}.
+	},
+	init(CryptoMod, CryptoOpts).
 
 -spec init(module(), term()) -> ctx().
 init(Module, Opts) -> {Module, Module:init(Opts)}.

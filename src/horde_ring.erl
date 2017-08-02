@@ -7,7 +7,9 @@
 	lookup/2,
 	update/3,
 	insert/3,
-	remove/2
+	remove/2,
+	to_list/1,
+	size/1
 ]).
 -export_type([ring/2, rev_fun/1]).
 -record(ring, {rev_fun, forward, reverse}).
@@ -59,6 +61,14 @@ insert(Key, Value, Ring) ->
 -spec remove(Key, ring(Key, Value)) -> ring(Key, Value).
 remove(Key, Ring) ->
 	modify_trees(Key, fun(K, Tree) -> gb_trees:delete_any(K, Tree) end, Ring).
+
+-spec to_list(ring(Key, Value)) -> [{Key, Value}].
+to_list(#ring{forward = Forward}) ->
+	gb_trees:to_list(Forward).
+
+-spec size(ring(_, _)) -> non_neg_integer().
+size(#ring{forward = Forward}) ->
+	gb_trees:size(Forward).
 
 % Private
 

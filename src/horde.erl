@@ -5,6 +5,11 @@
 	start_link/1,
 	start_link/2,
 	lookup/3,
+	info/1,
+	info/2,
+	join/3,
+	stop/1,
+	wait_join/2,
 	send_query/3
 ]).
 % gen_server
@@ -13,7 +18,8 @@
 	handle_call/3,
 	handle_cast/2,
 	handle_info/2,
-	terminate/2
+	terminate/2,
+	format_status/2
 ]).
 -export_type([
 	name/0,
@@ -25,6 +31,7 @@
 	message_header/0,
 	message_body/0
 ]).
+-compile({inline, [readable_fields/0]}).
 
 -type overlay_address() :: non_neg_integer().
 -type compound_address() :: #{
@@ -52,6 +59,7 @@
 -type name() :: {local, atom()} | {via, module(), term()}.
 -type ref() :: pid() | atom() | {via, module(), term()}.
 -type opts() :: #{
+	crypto := horde_crypto:ctx(),
 	keypair := horde_crypto:keypair(),
 	transport := {Module :: module(), Opts :: term()},
 	bootstrap_nodes => [horde_transport:address()],
@@ -78,11 +86,13 @@
 	max_address :: overlay_address(),
 	keypair :: horde_crypto:keypair(),
 	transport :: horde_transport:ref(),
+	status = standalone :: standalone | {joining, reference()} | ready,
+	join_waiters = [] :: list(),
 	queries = #{} :: #{reference() => #query{}},
 	successor :: node_info() | undefined,
 	predecessor :: node_info() | undefined,
 	ring :: horde_ring:ring(overlay_address(), node_info()),
-	ring_check_timer :: reference(),
+	%ring_check_timer :: reference(),
 	ring_check_interval :: non_neg_integer(),
 	num_nodes_probed = 0 :: non_neg_integer(),
 	num_nodes_failed = 0 :: non_neg_integer(),
@@ -109,11 +119,38 @@ start_link(Name, Opts) -> gen_server:start_link(Name, ?MODULE, Opts, []).
 lookup(Ref, Address, Timeout) ->
 	gen_server:call(Ref, {lookup, Address}, Timeout).
 
+-spec info
+	(ref(), status) -> boolean();
+	(ref(), ring) -> horde_ring:ring(overlay_address(), node_info());
+	(ref(), successor) -> node_info() | undefined;
+	(ref(), predecessor) -> node_info() | undefined;
+	(ref(), transport) -> horde_transport:ref().
+info(Ref, Info) -> gen_server:call(Ref, {info, Info}).
+
+-spec info(ref()) -> #{
+	status := standalone | joining | ready,
+	ring := horde_ring:ring(overlay_address(), node_info()),
+	transport := horde_transport:ref(),
+	successor := node_info() | undefined,
+	predecessor := node_info() | undefined
+}.
+info(Ref) -> gen_server:call(Ref, info).
+
+-spec join(ref(), [endpoint()], timeout()) -> boolean().
+join(Ref, BootstrapNodes, Timeout) ->
+	gen_server:call(Ref, {join, BootstrapNodes}, Timeout).
+
+-spec wait_join(ref(), timeout()) -> boolean().
+wait_join(Ref, Timeout) -> gen_server:call(Ref, wait_join, Timeout).
+
 -spec send_query(ref(), endpoint(), message_body()) -> reference().
 send_query(Ref, Endpoint, Message) ->
 	QueryRef = make_ref(),
 	gen_server:cast(Ref, {send_query, QueryRef, self(), Endpoint, Message}),
 	QueryRef.
+
+-spec stop(ref()) -> ok.
+stop(Ref) -> gen_server:stop(Ref).
 
 % gen_server
 
@@ -122,13 +159,17 @@ init(#{
 	keypair := {PubKey, _} = KeyPair,
 	transport := {TransportMod, TransportOpts}
 } = Opts) ->
-	case horde_transport:open(TransportMod, TransportOpts) of
+	Crypto = horde_crypto:init(CryptoMod, CryptoOpts),
+	case horde_transport:open(TransportMod, #{
+		crypto => Crypto,
+		keypair => KeyPair,
+		transport_opts => TransportOpts
+	}) of
 		{ok, Transport} ->
 			horde_transport:recv_async(Transport),
-			Crypto = horde_crypto:init(CryptoMod, CryptoOpts),
 			OverlayAddress = horde_crypto:address_of(Crypto, PubKey),
 			RingCheckInterval = maps:get(ring_check_interval, Opts, 60000),
-			RingCheckTimer = start_timer(RingCheckInterval, check_ring),
+			%RingCheckTimer = start_timer(RingCheckInterval, check_ring),
 			MaxAddress = horde_crypto:info(Crypto, max_address),
 			RevFun = fun(Addr) -> MaxAddress - Addr end,
 			State = #state{
@@ -138,7 +179,7 @@ init(#{
 				keypair = KeyPair,
 				transport = Transport,
 				ring = horde_ring:new(RevFun),
-				ring_check_timer = RingCheckTimer,
+				%ring_check_timer = RingCheckTimer,
 				ring_check_interval = RingCheckInterval,
 				query_timeout = maps:get(query_timeout, Opts, 5000),
 				num_retries = maps:get(num_retries, Opts, 3),
@@ -150,20 +191,28 @@ init(#{
 			},
 			% Bootstrap
 			BootstrapNodes = maps:get(bootstrap_nodes, Opts, []),
-			case length(BootstrapNodes) > 0 of
-				true ->
-					LookupEndpoints = [
-						{transport, Address} || Address <- BootstrapNodes
-					],
-					start_lookup(OverlayAddress, LookupEndpoints, none, State);
-				false ->
-					ok
-			end,
-			{ok, State};
+			case maybe_bootstrap(BootstrapNodes, State) of
+				{ok, _} = Ret -> Ret;
+				{error, Reason} -> {stop, Reason}
+			end;
 		{error, Reason} ->
 			{stop, Reason}
 	end.
 
+handle_call(wait_join, From, State) ->
+	maybe_add_join_waiter(From, State);
+handle_call(
+	{join, BootstrapNodes}, From,
+	#state{status = standalone} = State
+) ->
+	case maybe_bootstrap(BootstrapNodes, State) of
+		{ok, State2} ->
+			maybe_add_join_waiter(From, State2);
+		{error, _} ->
+			{reply, false, State}
+	end;
+handle_call({join, _}, From, State) ->
+	maybe_add_join_waiter(From, State);
 handle_call(
 	{lookup, Address}, From,
 	#state{
@@ -179,9 +228,13 @@ handle_call(
 		horde_ring:successors(OwnAddress, NumNeighbours, Ring),
 		horde_ring:predecessors(OwnAddress, NumNeighbours, Ring)
 	]),
-	LookupEndpoints = [{compound, Addr} || #{address := Addr} <- Peers],
-	start_lookup(Address, LookupEndpoints, From, State),
-	{noreply, State}.
+	LookupPeers = [{compound, Addr} || #{address := Addr} <- Peers],
+	_ = start_lookup(Address, LookupPeers, From, State),
+	{noreply, State};
+handle_call({info, What}, _From, State) ->
+	{reply, extract_info(What, State), State};
+handle_call(info, _From, State) ->
+	{reply, extract_info(State), State}.
 
 handle_cast(
 	{send_query, Ref, Sender, Endpoint, Message},
@@ -200,6 +253,20 @@ handle_cast(
 	State3 = State2#state{num_nodes_probed = NumNodesProbed + 1},
 	{noreply, State3}.
 
+handle_info(
+	{'DOWN', BootstrapRef, process, _, normal},
+	#state{
+		status = {joining, BootstrapRef},
+		predecessor = Predecessor,
+		successor = Successor
+	} = State
+) when Predecessor =/= undefined, Successor =/= undefined ->
+	{noreply, notify_join_status(State#state{status = ready})};
+handle_info(
+	{'DOWN', BootstrapRef, process, _, _},
+	#state{status = {joining, BootstrapRef}} = State
+) ->
+	{noreply, notify_join_status(State#state{status = standalone})};
 handle_info({timeout, _, {query_timeout, Id}} = Event, State) ->
 	State2 = dispatch_query_event(
 		Event, fun handle_query_error/4, Id, State
@@ -225,28 +292,42 @@ handle_info(Msg, State) ->
 	]),
 	{noreply, State}.
 
-terminate(_, #state{transport = Transport}) ->
+terminate(_Reason, #state{transport = Transport}) ->
 	_ = horde_transport:close(Transport),
 	ok.
 
+format_status(_Opt, [_PDict, State]) ->
+	[{data, [{"State", format_record(state, State)}]}].
+
 % Private
 
+maybe_bootstrap([], State) ->
+	{ok, State};
+maybe_bootstrap(BootstrapNodes, #state{address = OwnAddress} = State) ->
+	case start_lookup(OwnAddress, BootstrapNodes, none, State) of
+		{ok, Pid} ->
+			MonitorRef = erlang:monitor(process, Pid),
+			{ok, State#state{status = {joining, MonitorRef}}};
+		{error, _} = Err ->
+			Err
+	end.
+
 start_lookup(
-	Address, LookupEndpoints, ReplyTo,
+	Address, Peers, ReplyTo,
 	#state{
 		num_parallel_queries = NumParallelQueries,
 		max_address = MaxAddress
 	}
 ) ->
 	LookupArgs = #{
-		address => Address,
+		horde => self(),
 		sender => ReplyTo,
-		endpoints => LookupEndpoints,
+		address => Address,
+		peers => Peers,
 		max_address => MaxAddress,
 		num_parallel_queries => NumParallelQueries
 	},
-	{ok, _} = horde_lookup:start_link(LookupArgs),
-	ok.
+	horde_lookup:start_link(LookupArgs).
 
 handle_overlay_message(
 	#{from := Address, timestamp := Timestamp} = Header, Body,
@@ -415,6 +496,11 @@ send_query1(
 		queries = Queries#{Id => Query2}
 	}.
 
+add_node(
+	#{address := #{overlay := OwnAddress}},
+	#state{address = OwnAddress} = State
+) ->
+	State;
 add_node(Node, #state{ring = Ring} = State) ->
 	State2 = State#state{ring = maybe_update_ring(Node, Ring)},
 	State3 = maybe_update_neighbour(predecessor, Node, State2),
@@ -425,8 +511,10 @@ maybe_update_ring(#{last_seen := Timestamp} = Node, Ring) ->
 	case horde_ring:lookup(OverlayAddress, Ring) of
 		{value, #{last_seen := CacheTimestamp}} when CacheTimestamp < Timestamp ->
 			horde_ring:update(OverlayAddress, Node, Ring);
+		none ->
+			horde_ring:insert(OverlayAddress, Node, Ring);
 		_ ->
-			horde_ring:insert(OverlayAddress, Node, Ring)
+			Ring
 	end.
 
 maybe_update_neighbour(_, [], State) ->
@@ -520,12 +608,46 @@ maybe_remove_node(
 		predecessor, horde_ring:successors(OwnAddress, 1, Ring2), State3
 	).
 
+extract_info(State) ->
+	maps:from_list([
+		{What, extract_info(What, State)} || What <- readable_fields()
+	]).
+
+extract_info(status, #state{status = Status}) ->
+	case Status of
+		ready -> ready;
+		standalone -> standalone;
+		{joining, _} -> joining
+	end;
+extract_info(What, State) ->
+	Indices = lists:zip(
+		record_info(fields, state),
+		lists:seq(2, record_info(size, state))
+	),
+	AllowedIndices = lists:filter(
+		fun({Key, _Index}) -> lists:member(Key, readable_fields()) end,
+		Indices
+	),
+	element(proplists:get_value(What, AllowedIndices), State).
+
+readable_fields() ->
+	[status, transport, ring, successor, predecessor].
+
+notify_join_status(#state{status = Status, join_waiters = Waiters} = State) ->
+	_ = [gen_server:reply(Waiter, Status =:= ready) || Waiter <- Waiters],
+	State#state{join_waiters = []}.
+
+maybe_add_join_waiter(_Waiter, #state{status = ready} = State) ->
+	{reply, ready, State};
+maybe_add_join_waiter(Waiter, #state{join_waiters = Waiters} = State) ->
+	{noreply, State#state{join_waiters = [Waiter | Waiters]}}.
+
 -ifdef(TEST).
 start_timer(Timeout, Message) ->
 	horde_mock:start_timer(Timeout, self(), Message).
 
 cancel_timer(TimerRef) ->
-	_ = horde_mock:cancel_timer(TimerRef, [{async, true}]), ok.
+	_ = horde_mock:cancel_timer(TimerRef), ok.
 -else.
 start_timer(Timeout, Message) ->
 	erlang:start_timer(Timeout, self(), Message).
@@ -534,6 +656,27 @@ cancel_timer(TimerRef) ->
 	_ = erlang:cancel_timer(TimerRef, [{async, true}]),
 	ok.
 -endif.
+
+format_record(Type, Record) ->
+	Indices = lists:zip(
+		rec_info(fields, Type),
+		lists:seq(2, rec_info(size, Type))
+	),
+	maps:from_list([
+		{Key, format_field(Type, Key, element(Index, Record))}
+		|| {Key, Index} <- Indices
+	]).
+
+format_field(state, ring, Ring) ->
+	horde_ring:size(Ring);
+format_field(state, keypair, {PK, _SK}) ->
+	{base64:encode(PK), <<>>};
+format_field(state, queries, Queries) ->
+	maps:size(Queries);
+format_field(_Type, _Key, Value) -> Value.
+
+rec_info(size, state) -> record_info(size, state);
+rec_info(fields, state) -> record_info(fields, state).
 
 undefined_if_removed(Address, #{address := Address}) -> undefined;
 undefined_if_removed(_, Node) -> Node.

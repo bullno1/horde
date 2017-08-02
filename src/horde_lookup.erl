@@ -32,7 +32,7 @@ init(#{
 		{distance(Peer, Address, MaxAddress), Peer} || Peer <- Peers
 	]),
 	{InitialPeers, FallbackPeers} =
-		case length(SortedPeers) > NumParallelQueries of
+		case NumParallelQueries > length(SortedPeers) of
 			true -> {SortedPeers, []};
 			false -> lists:split(NumParallelQueries, SortedPeers)
 		end,
