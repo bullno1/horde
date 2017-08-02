@@ -62,8 +62,12 @@ bootstrap(_Config) ->
 	Transport = horde:info(BootstrapNode, transport),
 	BootstrapAddress = horde_transport:info(Transport, address),
 	BootstrapNodes = [{transport, BootstrapAddress}],
+	lists:foreach(
+		fun(Node) -> horde:join_async(Node, BootstrapNodes) end,
+		tl(Nodes)
+	),
 	true = lists:all(
-		fun(Node) -> horde:join(Node, BootstrapNodes, infinity) end,
+		fun(Node) -> horde:wait_join(Node, infinity) end,
 		tl(Nodes)
 	),
 	% A node's ring must not contains itself
