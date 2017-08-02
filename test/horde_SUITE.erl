@@ -53,6 +53,21 @@ bootstrap(_Config) ->
 		fun(Node) -> ready =:= horde:info(Node, status) end,
 		Nodes
 	),
+	% Any node can lookup other nodes
+	lists:all(
+		fun(Node) ->
+			lists:all(
+				fun(OtherNode) ->
+					OverlayAddress = horde:info(OtherNode, address),
+					NodeTransport = horde:info(OtherNode, transport),
+					TransportAddress = horde_transport:info(NodeTransport, address),
+					horde:lookup(Node, OverlayAddress, infinity) =:= {ok, TransportAddress}
+				end,
+				Nodes
+			)
+		end,
+		Nodes
+	),
 	_ = [horde:stop(Node) || Node <- Nodes],
 	horde:stop(BootstrapNode),
 	ok.
