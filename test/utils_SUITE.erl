@@ -14,15 +14,15 @@ end_per_suite(Config) ->
 	ok.
 
 crypto(_Config) ->
-	#{crypto := {CryptoMod, CryptoOpts}} = Realm = horde:default_realm(),
-	{PK, SK} = horde:generate_keypair(Realm),
+	{CryptoMod, CryptoOpts} = horde_crypto:default(),
 	Crypto = horde_crypto:init(CryptoMod, CryptoOpts),
+	{PK, SK} = horde_crypto:generate_keypair(Crypto),
 
 	Address = horde_crypto:address_of(Crypto, PK),
 	MaxAddress = horde_crypto:info(Crypto, max_address),
 	true = Address =< MaxAddress,
 
-	{PK2, _SK2} = horde:generate_keypair(Realm),
+	{PK2, _SK2} = horde_crypto:generate_keypair(Crypto),
 	Address2 = horde_crypto:address_of(Crypto, PK2),
 	true = Address =/= Address2,
 	true = Address2 =< MaxAddress,

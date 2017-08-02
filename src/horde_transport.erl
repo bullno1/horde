@@ -1,16 +1,15 @@
 -module(horde_transport).
--export_type([ref/0, address/0, event/0]).
+-export_type([ref/0, address/0]).
 -export([
 	open/2,
 	info/2,
-	send/3,
+	send/4,
 	recv_async/1,
 	close/1
 ]).
 
 -opaque ref() :: {module(), term()}.
 -opaque address() :: {module(), term()}.
--type event() :: {horde_transport, horde:message()}.
 
 % callback
 
@@ -23,10 +22,11 @@
 	Ref :: term(),
 	Address :: term().
 
--callback send(Ref, Address, Message) -> any() when
+-callback send(Ref, Address, Id, Body) -> any() when
 	Ref :: term(),
 	Address :: term(),
-	Message :: horde:message().
+	Id :: term(),
+	Body :: horde:message_body().
 
 -callback recv_async(Ref) -> any() when
 	Ref :: term().
@@ -46,9 +46,9 @@ open(Module, Opts) ->
 -spec info(ref(), address) -> address().
 info({Module, Ref}, Info) -> {Module, Module:info(Ref, Info)}.
 
--spec send(ref(), address(), horde:message()) -> ok.
-send({Module, Ref}, {Module, Address}, Message) ->
-	Module:send(Ref, Address, Message),
+-spec send(ref(), address(), term(), horde:message_body()) -> ok.
+send({Module, Ref}, {Module, Address}, Id, Body) ->
+	Module:send(Ref, Address, Id, Body),
 	ok.
 
 -spec recv_async(ref()) -> ok.

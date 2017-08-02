@@ -1,6 +1,7 @@
 -module(horde_crypto).
 -export_type([ctx/0, keypair/0]).
 -export([
+	default/0,
 	init/2,
 	info/2,
 	generate_keypair/1,
@@ -55,6 +56,14 @@
 	Obj :: term(),
 	Reason :: term(),
 	Bin :: binary().
+
+-spec default() -> {module(), term()}.
+default() ->
+	{horde_ecdsa, #{
+		hash_algo => sha256,
+		curve => secp384r1,
+		address_size => 160
+	}}.
 
 -spec init(module(), term()) -> ctx().
 init(Module, Opts) -> {Module, Module:init(Opts)}.

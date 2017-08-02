@@ -2,12 +2,10 @@
 -behaviour(gen_server).
 % API
 -export([
-	default_realm/0,
-	generate_keypair/1,
 	start_link/1,
 	start_link/2,
 	lookup/3,
-	send/3
+	send_query/3
 ]).
 % gen_server
 -export([
@@ -22,78 +20,65 @@
 	ref/0,
 	overlay_address/0,
 	compound_address/0,
+	endpoint/0,
 	node_info/0,
-	txid/0,
-	message/0,
 	message_header/0,
 	message_body/0
 ]).
-
--define(MAX_TXID, 65535).
 
 -type overlay_address() :: non_neg_integer().
 -type compound_address() :: #{
 	overlay := overlay_address(),
 	transport := horde_transport:address()
 }.
--type message() :: {message_header(), message_body()}.
--type txid() :: 0..?MAX_TXID.
+-type endpoint()
+	:: {compound, compound_address()}
+	 | {transport, horde_transport:address()}.
 -type message_header() :: #{
 	from := compound_address(),
-	txid := txid(),
+	id => term(),
 	timestamp := non_neg_integer()
-}.
--type node_info() :: #{
-	address := compound_address(),
-	last_seen := non_neg_integer(),
-	source => direct | indirect
 }.
 -type message_body() ::
 	  {lookup, overlay_address()}
 	| ping
 	| {peer_info, [node_info()]}
 	| {user, binary()}.
+-type node_info() :: #{
+	address := compound_address(),
+	last_seen := non_neg_integer(),
+	source => direct | indirect
+}.
 -type name() :: {local, atom()} | {via, module(), term()}.
 -type ref() :: pid() | atom() | {via, module(), term()}.
--type realm() :: #{
-	name := binary(),
-	crypto := {module(), term()}
-}.
 -type opts() :: #{
-	realm := realm(),
 	keypair := horde_crypto:keypair(),
 	transport := {Module :: module(), Opts :: term()},
 	bootstrap_nodes => [horde_transport:address()],
 	ring_check_interval => non_neg_integer(),
+	query_timeout => pos_integer(),
+	num_retries => non_neg_integer(),
+	retry_delay => non_neg_integer(),
 	num_parallel_queries => pos_integer(),
 	num_next_hops => pos_integer(),
 	num_neighbours => pos_integer(),
 	min_slice_size => pos_integer()
 }.
--type query_target()
-	:: {transport, horde_transport:address()}
-	 | {compound, compound_address()}.
 
--record(query_status, {
-	num_retries :: non_neg_integer()
-}).
--record(lookup, {
-	address :: overlay_address(),
-	reply_to :: {client, term()} | none,
-	queries :: #{query_target() => #query_status{}}
-}).
--record(ping, {
-	address :: compound_address(),
-	num_retries :: non_neg_integer()
+-record(query, {
+	sender :: pid() | none,
+	destination :: endpoint(),
+	message :: message_body(),
+	num_retries :: non_neg_integer(),
+	timer :: reference() | undefined
 }).
 -record(state, {
-	realm_name :: binary(),
 	crypto :: horde_crypto:ctx(),
-	address :: compound_address(),
+	address :: overlay_address(),
+	max_address :: overlay_address(),
 	keypair :: horde_crypto:keypair(),
 	transport :: horde_transport:ref(),
-	next_txid = 0 :: txid(),
-	transactions = #{} :: #{txid() => #lookup{} | #ping{}},
+	queries = #{} :: #{reference() => #query{}},
 	successor :: node_info() | undefined,
 	predecessor :: node_info() | undefined,
 	ring :: horde_ring:ring(overlay_address(), node_info()),
@@ -102,6 +87,7 @@
 	num_nodes_probed = 0 :: non_neg_integer(),
 	num_nodes_failed = 0 :: non_neg_integer(),
 	query_timeout :: pos_integer(),
+	retry_delay :: pos_integer(),
 	num_retries :: pos_integer(),
 	num_parallel_queries :: pos_integer(),
 	num_next_hops :: pos_integer(),
@@ -110,22 +96,6 @@
 }).
 
 % API
-
--spec default_realm() -> realm().
-default_realm() ->
-	#{
-		name => <<"horde">>,
-		crypto => {horde_ecdsa, #{
-			hash_algo => sha256,
-			address_size => 160,
-			curve => secp521r1
-		}}
-	}.
-
--spec generate_keypair(realm()) -> horde_crypto:keypair().
-generate_keypair(#{crypto := {Module, Opts}}) ->
-	Ctx = horde_crypto:init(Module, Opts),
-	horde_crypto:generate_keypair(Ctx).
 
 -spec start_link(opts()) -> {ok, pid()} | {error, any()}.
 start_link(Opts) -> gen_server:start_link(?MODULE, Opts, []).
@@ -139,37 +109,32 @@ start_link(Name, Opts) -> gen_server:start_link(Name, ?MODULE, Opts, []).
 lookup(Ref, Address, Timeout) ->
 	gen_server:call(Ref, {lookup, Address}, Timeout).
 
--spec send(ref(), overlay_address(), binary()) -> ok | {error, term()}.
-send(Ref, Dest, Message) ->
-	gen_server:call(Ref, {send, Dest, Message}).
+-spec send_query(ref(), endpoint(), message_body()) -> reference().
+send_query(Ref, Endpoint, Message) ->
+	QueryRef = make_ref(),
+	gen_server:cast(Ref, {send_query, QueryRef, self(), Endpoint, Message}),
+	QueryRef.
 
 % gen_server
 
 init(#{
-	realm := #{
-		name := RealmName,
-		crypto := {CryptoMod, CryptoOpts}
-	},
-	bootstrap_nodes := BootstrapNodes,
+	crypto := {CryptoMod, CryptoOpts},
 	keypair := {PubKey, _} = KeyPair,
 	transport := {TransportMod, TransportOpts}
 } = Opts) ->
 	case horde_transport:open(TransportMod, TransportOpts) of
 		{ok, Transport} ->
+			horde_transport:recv_async(Transport),
 			Crypto = horde_crypto:init(CryptoMod, CryptoOpts),
 			OverlayAddress = horde_crypto:address_of(Crypto, PubKey),
-			TransportAddress = horde_transport:info(Transport, address),
 			RingCheckInterval = maps:get(ring_check_interval, Opts, 60000),
-			RingCheckTimer = erlang:send_after(RingCheckInterval, self(), check_ring),
+			RingCheckTimer = start_timer(RingCheckInterval, check_ring),
 			MaxAddress = horde_crypto:info(Crypto, max_address),
 			RevFun = fun(Addr) -> MaxAddress - Addr end,
 			State = #state{
-				realm_name = RealmName,
 				crypto = Crypto,
-				address = #{
-					overlay => OverlayAddress,
-					transport => TransportAddress
-				},
+				address = OverlayAddress,
+				max_address = MaxAddress,
 				keypair = KeyPair,
 				transport = Transport,
 				ring = horde_ring:new(RevFun),
@@ -177,45 +142,82 @@ init(#{
 				ring_check_interval = RingCheckInterval,
 				query_timeout = maps:get(query_timeout, Opts, 5000),
 				num_retries = maps:get(num_retries, Opts, 3),
-				num_parallel_queries = maps:get(k, Opts, 3),
-				num_next_hops = maps:get(k, Opts, 3),
-				num_neighbours = maps:get(k, Opts, 5),
-				min_slice_size = maps:get(j, Opts, 2)
+				retry_delay = maps:get(retry_delay, Opts, 500),
+				num_parallel_queries = maps:get(num_parallel_queries, Opts, 3),
+				num_next_hops = maps:get(num_next_hops, Opts, 3),
+				num_neighbours = maps:get(num_neighbours, Opts, 5),
+				min_slice_size = maps:get(min_slice_size, Opts, 2)
 			},
 			% Bootstrap
-			LookupTargets = [{transport, Address} || Address <- BootstrapNodes],
-			State2 = send_lookup(OverlayAddress, LookupTargets, none, State),
-			{ok, State2};
+			BootstrapNodes = maps:get(bootstrap_nodes, Opts, []),
+			case length(BootstrapNodes) > 0 of
+				true ->
+					LookupEndpoints = [
+						{transport, Address} || Address <- BootstrapNodes
+					],
+					start_lookup(OverlayAddress, LookupEndpoints, none, State);
+				false ->
+					ok
+			end,
+			{ok, State};
 		{error, Reason} ->
 			{stop, Reason}
 	end.
 
 handle_call(
 	{lookup, Address}, From,
-	#state{ring = Ring, num_parallel_queries = NumParallelQueries} = State
+	#state{
+		address = OwnAddress,
+		ring = Ring,
+		num_parallel_queries = NumParallelQueries,
+		num_neighbours = NumNeighbours
+	} = State
 ) ->
-	Peers = ordsets:union(
+	Peers = ordsets:union([
 		horde_ring:successors(Address, 1, Ring),
-		horde_ring:predecessors(Address, NumParallelQueries - 1, Ring)
-	),
-	Targets = [{compound, Addr} || #{address := Addr} <- Peers],
-	{noreply, send_lookup(Address, Targets, {client, From}, State)}.
+		horde_ring:predecessors(Address, NumParallelQueries - 1, Ring),
+		horde_ring:successors(OwnAddress, NumNeighbours, Ring),
+		horde_ring:predecessors(OwnAddress, NumNeighbours, Ring)
+	]),
+	LookupEndpoints = [{compound, Addr} || #{address := Addr} <- Peers],
+	start_lookup(Address, LookupEndpoints, From, State),
+	{noreply, State}.
 
-handle_cast(_, State) -> {noreply, State}.
-
-handle_info(
-	{query_timeout, Txid, Target},
-	#state{transactions = Transactions} = State
+handle_cast(
+	{send_query, Ref, Sender, Endpoint, Message},
+	#state{
+		num_retries = NumRetries,
+		num_nodes_probed = NumNodesProbed
+	} = State
 ) ->
-	State2 = case maps:find(Txid, Transactions) of
-		{ok, Transaction} ->
-			handle_tx_event({query_timeout, Target}, Txid, Transaction, State);
-		error ->
-			State
-	end,
+	Query = #query{
+		sender = Sender,
+		destination = Endpoint,
+		message = Message,
+		num_retries = NumRetries
+	},
+	State2 = send_query1(Ref, Query, State),
+	State3 = State2#state{num_nodes_probed = NumNodesProbed + 1},
+	{noreply, State3}.
+
+handle_info({timeout, _, {query_timeout, Id}} = Event, State) ->
+	State2 = dispatch_query_event(
+		Event, fun handle_query_error/4, Id, State
+	),
 	{noreply, State2};
-handle_info({horde_transport, Msg}, State) ->
-	{noreply, handle_overlay_message(Msg, State)};
+handle_info(
+	{horde_transport, Transport, {message, Header, Body}},
+	#state{transport = Transport} = State
+) ->
+	State2 = handle_overlay_message(Header, Body, State),
+	horde_transport:recv_async(Transport),
+	{noreply, State2};
+handle_info(
+	{horde_transport, Transport, {transport_error, _, Id} = Error},
+	#state{transport = Transport} = State
+) ->
+	State2 = dispatch_query_event(Error, fun handle_query_error/4, Id, State),
+	{noreply, State2};
 handle_info(Msg, State) ->
 	error_logger:warning_report([
 		{?MODULE, "Unexpected message"},
@@ -229,44 +231,33 @@ terminate(_, #state{transport = Transport}) ->
 
 % Private
 
-send_lookup(
-	Address, Targets, ReplyTo,
+start_lookup(
+	Address, LookupEndpoints, ReplyTo,
 	#state{
-		next_txid = Txid,
-		num_retries = NumRetries,
-		num_nodes_probed = NumNodesProbed,
-		transactions = Transactions
-	} = State
+		num_parallel_queries = NumParallelQueries,
+		max_address = MaxAddress
+	}
 ) ->
-	% Send lookup
-	State2 = lists:foldl(
-		fun(Target, StateAcc) ->
-			send_query(Txid, Target, {lookup, Address}, StateAcc)
-		end,
-		State,
-		Targets
-	),
-	% Track lookup
-	Queries = maps:from_list([
-		{Target, #query_status{num_retries = NumRetries}} || Target <- Targets
-	]),
-	Lookup = #lookup{address = Address, reply_to = ReplyTo, queries = Queries},
-	State2#state{
-		next_txid = (Txid + 1) rem ?MAX_TXID,
-		transactions = Transactions#{Txid => Lookup},
-		num_nodes_probed = NumNodesProbed + length(Targets)
-	}.
+	LookupArgs = #{
+		address => Address,
+		sender => ReplyTo,
+		endpoints => LookupEndpoints,
+		max_address => MaxAddress,
+		num_parallel_queries => NumParallelQueries
+	},
+	{ok, _} = horde_lookup:start_link(LookupArgs),
+	ok.
 
 handle_overlay_message(
-	{#{from := Address, timestamp := Timestamp} = Header, Body},
+	#{from := Address, timestamp := Timestamp} = Header, Body,
 	State
 ) ->
-	State2 = handle_overlay_message(Header, Body, State),
+	State2 = handle_overlay_message1(Header, Body, State),
 	Node = #{address => Address, last_seen => Timestamp, source => direct},
 	add_node(Node, State2).
 
-handle_overlay_message(
-	#{from := Sender} = Header, {lookup, Address},
+handle_overlay_message1(
+	#{from := Sender} = Header, {lookup, TargetAddress},
 	#state{
 		ring = Ring,
 		address = OwnAddress,
@@ -275,31 +266,33 @@ handle_overlay_message(
 		num_next_hops = NumNextHops
 	} = State
 ) ->
-	Nodes = case horde_ring:lookup(Address, Ring) of
+	Nodes = case horde_ring:lookup(TargetAddress, Ring) of
 		% If node is known, reply with info and own immediate predecessor
 		{value, Node} ->
 			ordsets:add_element(Node, set_of(OwnPredecessor));
+		% If node is not known, reply with a closer immediate neighbour and
+		% a number of "next best hops" around the target.
 		none ->
-			% l next best hops for x are the hops immediately after x and l - 1
-			% predecessors.
-			NextBestHops = ordsets:union(
-				horde_ring:successors(Address, 1, Ring),
-				horde_ring:predecessors(Address, NumNextHops - 1, Ring)
-			),
-			ExtraNode =
+			{CloserNeighbour, NumSuccessors, NumPredecessors} =
 				case horde_address:is_between(
-					overlay_address(OwnAddress), overlay_address(Sender), Address
+					OwnAddress,
+					overlay_address(Sender),
+					TargetAddress
 				) of
-					true -> OwnSuccessor;
-					false -> OwnPredecessor
+					true -> {OwnSuccessor, 1, NumNextHops - 1};
+					false -> {OwnPredecessor, NumNextHops - 1, 1}
 				end,
-			ordsets:union(set_of(ExtraNode), NextBestHops)
+			ordsets:union([
+				set_of(CloserNeighbour),
+				horde_ring:successors(TargetAddress, NumSuccessors, Ring),
+				horde_ring:predecessors(TargetAddress, NumPredecessors, Ring)
+			])
 	end,
 	reply(Header, {peer_info, Nodes}, State);
-handle_overlay_message(
+handle_overlay_message1(
 	Header, ping,
 	#state{
-		ring = Ring, address = #{overlay := OwnAddress},
+		ring = Ring, address = OwnAddress,
 		num_neighbours = NumNeighbours
 	} = State
 ) ->
@@ -308,37 +301,119 @@ handle_overlay_message(
 		horde_ring:predecessors(OwnAddress, NumNeighbours, Ring)
 	),
 	reply(Header, {peer_info, Nodes}, State);
-handle_overlay_message(
-	#{txid := Txid, address := Address},
-	{peer_info, Peers},
-	#state{transactions = Transactions} = State
+handle_overlay_message1(
+	#{id := Id} = Header, {peer_info, Peers} = Message, State
 ) ->
-	State2 = case maps:find(Txid, Transactions) of
-		{ok, Transaction} ->
-			handle_tx_event({result, Address, Peers}, Txid, Transaction, State);
-		_ ->
-			State
-	end,
+	State2 = dispatch_query_event(
+		{Header, Message},
+		fun handle_query_reply/4,
+		Id, State
+	),
 	lists:foldl(
-		fun(Peer, StateAcc) ->
-			add_node(Peer#{source => indirect}, StateAcc)
-		end,
+		fun(Peer, Acc) -> add_node(Peer#{source => indirect}, Acc) end,
 		State2,
 		Peers
 	).
 
 reply(
-	#{from := #{transport := SenderAddress}, txid := Txid},
-	MsgBody,
-	#state{transport = Transport, address = OwnAddress} = State
+	#{from := #{transport := Sender}, id := Id},
+	Message,
+	#state{transport = Transport} = State
 ) ->
-	Header = #{
-		from => OwnAddress,
-		txid => Txid,
-		timestamp => erlang:system_time(seconds)
-	},
-	horde_transport:send(Transport, SenderAddress, {Header, MsgBody}),
+	horde_transport:send(Transport, Sender, Id, Message),
 	State.
+
+dispatch_query_event(Event, Handler, Id, #state{queries = Queries} = State) ->
+	case maps:find(Id, Queries) of
+		{ok, Query} -> Handler(Event, Id, Query, State);
+		error -> State
+	end.
+
+handle_query_reply(
+	{#{from := #{transport := TransportAddress} = CompoundAddress}, Message},
+	Id, #query{sender = Sender, destination = Destination, timer = Timer},
+	#state{queries = Queries} = State
+) ->
+	IsCorrectReply =
+		case Destination of
+			{compound, CompoundAddress} -> true;
+			{transport, TransportAddress} -> true;
+			_ -> false
+		end,
+	case IsCorrectReply of
+		true ->
+			_ = maybe_send(Sender, {?MODULE, Id, {reply, Message}}),
+			cancel_timer(Timer),
+			State#state{queries = maps:remove(Id, Queries)};
+		false ->
+			State
+	end.
+
+handle_query_error(
+	{timeout, TimerRef, {query_timeout, Id}},
+	Id, #query{timer = TimerRef} = Query,
+	State
+) ->
+	handle_query_timeout(Id, Query, State);
+handle_query_error(
+	{transport_error, _, Id},
+	Id, Query,
+	State
+) ->
+	handle_transport_error(Id, Query, State);
+handle_query_error(_, _, _, State) ->
+	State.
+
+handle_query_timeout(
+	Id, #query{num_retries = 0, sender = Sender, destination = Destination},
+	#state{queries = Queries, num_nodes_failed = NumNodesFailed} = State
+) ->
+	_ = maybe_send(Sender, {?MODULE, Id, noreply}),
+	State2 = State#state{
+		queries = maps:remove(Id, Queries),
+		num_nodes_failed = NumNodesFailed + 1
+	},
+	maybe_remove_node(Destination, State2);
+handle_query_timeout(
+	Id, #query{num_retries = NumRetries} = Query,
+	State
+) ->
+	Query2 = Query#query{num_retries = NumRetries - 1},
+	send_query1(Id, Query2, State).
+
+handle_transport_error(
+	Id, #query{timer = TimerRef} = Query,
+	#state{queries = Queries, retry_delay = RetryDelay} = State
+) ->
+	cancel_timer(TimerRef),
+	Query2 = Query#query{
+		timer = start_timer(RetryDelay, {query_timeout, Id})
+	},
+	State#state{
+		queries = Queries#{Id := Query2}
+	}.
+
+send_query1(
+	Id,
+	#query{destination = Destination, message = Message} = Query,
+	#state{
+		queries = Queries,
+		query_timeout = QueryTimeout,
+		transport = Transport
+	} = State
+) ->
+	TransportAddress =
+		case Destination of
+			{compound, #{transport := Address}} -> Address;
+			{transport, Address} -> Address
+		end,
+	horde_transport:send(Transport, TransportAddress, Id, Message),
+	Query2 = Query#query{
+		timer = start_timer(QueryTimeout, {query_timeout, Id})
+	},
+	State#state{
+		queries = Queries#{Id => Query2}
+	}.
 
 add_node(Node, #state{ring = Ring} = State) ->
 	State2 = State#state{ring = maybe_update_ring(Node, Ring)},
@@ -354,15 +429,82 @@ maybe_update_ring(#{last_seen := Timestamp} = Node, Ring) ->
 			horde_ring:insert(OverlayAddress, Node, Ring)
 	end.
 
-remove_node({transport, _}, State) ->
+maybe_update_neighbour(_, [], State) ->
 	State;
-remove_node(
+maybe_update_neighbour(Position, [Node], State) ->
+	maybe_update_neighbour(Position, Node, State);
+maybe_update_neighbour(
+	predecessor, Node, #state{predecessor = undefined} = State
+) when is_map(Node) ->
+	maybe_set_neighbour(predecessor, Node, State);
+maybe_update_neighbour(
+	successor, Node, #state{successor = undefined} = State
+) when is_map(Node) ->
+	maybe_set_neighbour(successor, Node, State);
+maybe_update_neighbour(
+	predecessor, Node,
+	#state{address = OwnAddress, predecessor = Predecessor} = State
+) ->
+	case horde_address:is_between(
+		overlay_address(Node),
+		overlay_address(Predecessor),
+		OwnAddress
+	) of
+		true -> maybe_set_neighbour(predecessor, Node, State);
+		false -> State
+	end;
+maybe_update_neighbour(
+	successor, Node,
+	#state{address = OwnAddress, successor = Successor} = State
+) ->
+	case horde_address:is_between(
+		overlay_address(Node),
+		OwnAddress,
+		overlay_address(Successor)
+	) of
+		true -> maybe_set_neighbour(successor, Node, State);
+		false -> State
+	end.
+
+maybe_set_neighbour(
+	_Postion,
+	#{address := Address, source := indirect},
+	#state{queries = Queries, num_retries = NumRetries} = State
+) ->
+	case is_querying(Address, Queries) of
+		true ->
+			State;
+		false ->
+			Query = #query{
+				sender = none,
+				destination = {compound, Address},
+				message = ping,
+				num_retries = NumRetries
+			},
+			send_query1(make_ref(), Query, State)
+	end;
+maybe_set_neighbour(successor, #{source := direct} = Node, State) ->
+	State#state{successor = Node};
+maybe_set_neighbour(predecessor, #{source := direct} = Node, State) ->
+	State#state{predecessor = Node}.
+
+is_querying(Address, Queries) ->
+	lists:any(
+		fun(#query{destination = Destination}) ->
+			Destination =:= {compound, Address}
+		end,
+		maps:values(Queries)
+	).
+
+maybe_remove_node({transport, _}, State) ->
+	State;
+maybe_remove_node(
 	{compound, RemovedAddress},
 	#state{
-		address = #{overlay := OwnAddress},
+		address = OwnAddress,
 		ring = Ring,
-		predecessor = Predecessor,
-		successor = Successor
+		successor = Successor,
+		predecessor = Predecessor
 	} = State
 ) ->
 	Ring2 = horde_ring:remove(RemovedAddress, Ring),
@@ -378,208 +520,29 @@ remove_node(
 		predecessor, horde_ring:successors(OwnAddress, 1, Ring2), State3
 	).
 
-maybe_update_neighbour(_, [], State) ->
-	State;
-maybe_update_neighbour(Position, [Node], State) ->
-	maybe_update_neighbour(Position, Node, State);
-maybe_update_neighbour(
-	predecessor, Node, #state{predecessor = undefined} = State
-) when is_map(Node) ->
-	State#state{predecessor = Node};
-maybe_update_neighbour(
-	successor, Node, #state{successor = undefined} = State
-) when is_map(Node) ->
-	State#state{successor = Node};
-maybe_update_neighbour(
-	predecessor, #{source := Source} = Node,
-	#state{address = OwnAddress, predecessor = Predecessor} = State
-) ->
-	case horde_address:is_between(
-		overlay_address(Node),
-		overlay_address(Predecessor),
-		overlay_address(OwnAddress)
-	) of
-		true ->
-			case Source of
-				direct -> State#state{predecessor = Node};
-				indirect -> start_ping(Node, State)
-			end;
-		false ->
-			State
-	end;
-maybe_update_neighbour(
-	successor, #{source := Source} = Node,
-	#state{address = OwnAddress, successor = Successor} = State
-) ->
-	case horde_address:is_between(
-		overlay_address(Node), overlay_address(OwnAddress), overlay_address(Successor)
-	) of
-		true ->
-			case Source of
-				direct -> State#state{successor = Node};
-				indirect -> start_ping(Node, State)
-			end;
-		false ->
-			State
-	end.
+-ifdef(TEST).
+start_timer(Timeout, Message) ->
+	horde_mock:start_timer(Timeout, self(), Message).
+
+cancel_timer(TimerRef) ->
+	_ = horde_mock:cancel_timer(TimerRef, [{async, true}]), ok.
+-else.
+start_timer(Timeout, Message) ->
+	erlang:start_timer(Timeout, self(), Message).
+
+cancel_timer(TimerRef) ->
+	_ = erlang:cancel_timer(TimerRef, [{async, true}]),
+	ok.
+-endif.
 
 undefined_if_removed(Address, #{address := Address}) -> undefined;
 undefined_if_removed(_, Node) -> Node.
 
-start_ping(Node, State) ->
-	case is_pinging(overlay_address(Node), State#state.transactions) of
-		true -> State;
-		false -> start_ping1(Node, State)
-	end.
-
-is_pinging(Address, Transactions) ->
-	lists:any(
-		fun(Transaction) -> is_targeting(Address, Transaction) end,
-		maps:values(Transactions)
-	).
-
-is_targeting(Address, #ping{address = #{overlay := Address}}) ->
-	true;
-is_targeting(Address, #lookup{queries = Queries}) ->
-	lists:any(
-		fun({compound, CompoundAddress}) ->
-			overlay_address(CompoundAddress) =:= Address;
-		   (_) ->
-			false
-		end,
-		maps:keys(Queries)
-	).
-
-start_ping1(
-	#{address := Address},
-	#state{
-		next_txid = Txid,
-		transactions = Transactions,
-		num_nodes_probed = NumNodesProbed,
-		num_retries = NumRetries
-	} = State
-) ->
-	% Send ping
-	State2 = send_query(Txid, {compound, Address}, ping, State),
-	% Track ping
-	Ping = #ping{address = Address, num_retries = NumRetries},
-	State2 = State#state{
-		next_txid = (Txid + 1) rem ?MAX_TXID,
-		transactions = Transactions#{Txid => Ping},
-		num_nodes_probed = NumNodesProbed + 1
-	}.
-
-send_query(
-	Txid, Target, Message,
-	#state{
-	    address = OwnAddress,
-	    transport = Transport,
-		query_timeout = QueryTimeout
-	} = State
-) ->
-	Header = #{
-		from => OwnAddress,
-		txid => Txid,
-		timestamp => erlang:system_time(seconds)
-	},
-	horde_transport:send(Transport, transport_address(Target), {Header, Message}),
-	_ = erlang:send_after(QueryTimeout, self(), {query_timeout, Txid, Target}),
-	State.
-
-handle_tx_event(Event, Txid, #ping{} = Ping, State) ->
-	handle_ping_event(Event, Txid, Ping, State);
-handle_tx_event(Event, Txid, #lookup{} = Lookup, State) ->
-	handle_lookup_event(Event, Txid, Lookup, State).
-
-handle_ping_event(
-	{query_timeout, Target},
-	Txid, #ping{num_retries = 0},
-	#state{
-		transactions = Transactions,
-		num_nodes_failed = NumNodesFailed
-	} = State
-) ->
-	State2 = State#state{
-		transactions = maps:remove(Txid, Transactions),
-		num_nodes_failed = NumNodesFailed + 1
-	},
-	remove_node(Target, State2);
-handle_ping_event(
-	{query_timeout, Target},
-	Txid, #ping{num_retries = NumRetries} = Ping,
-	#state{transactions = Transactions} = State
-) ->
-	State2 = State#state{
-		transactions = Transactions#{
-			Txid := Ping#ping{num_retries = NumRetries - 1}
-		}
-	},
-	send_query(Txid, Target, ping, State2);
-handle_ping_event(
-	{result, Address, _},
-	Txid, #ping{address = Address},
-	#state{transactions = Transactions} = State
-) ->
-	State#state{transactions = maps:remove(Txid, Transactions)};
-handle_ping_event(_Event, _Txid, _Ping, State) ->
-	State.
-
-handle_lookup_event(
-	{query_timeout, Target}, Txid, #lookup{queries = Queries} = Lookup, State
-) ->
-	case maps:find(Target, Queries) of
-		{ok, Query} ->
-			handle_lookup_query_timeout(Target, Query, Txid, Lookup, State);
-		error ->
-			State
-	end.
-
-handle_lookup_query_timeout(
-	Target, #query_status{num_retries = NumRetries} = Query,
-	Txid, #lookup{
-		address = Address, queries = Queries, reply_to = Client
-	} = Lookup,
-	#state{
-		transactions = Transactions,
-		num_nodes_failed = NumNodesFailed
-	} = State
-) ->
-	NextAction = case NumRetries > 0 of
-		true -> {retry, Query#query_status{num_retries = NumRetries - 1}};
-		false -> stop
-	end,
-	case NextAction of
-		{retry, Query2} ->
-			Queries2 = Queries#{Target := Query2},
-			Transactions2 = Transactions#{
-				Txid := Lookup#lookup{queries = Queries2}
-			},
-			State2 = State#state{transactions = Transactions2},
-			send_query(Txid, Target, {lookup, Address}, State2);
-		stop ->
-			Queries2 = maps:remove(Target, Queries),
-			Transactions2 = case maps:size(Queries2) =:= 0 of
-				true ->
-					maybe_reply(Client, {error, timeout}),
-					maps:remove(Txid, Transactions);
-				false ->
-					Transactions#{Txid := Lookup#lookup{queries = Queries2}}
-			end,
-			State2 = State#state{
-				transactions = Transactions2,
-				num_nodes_failed = NumNodesFailed + 1
-			},
-			remove_node(Target, State2)
-	end.
-
-maybe_reply(none, _) -> ok;
-maybe_reply({_, _} = Client, Msg) -> gen_server:reply(Client, Msg).
-
 overlay_address(#{address := #{overlay := Address}}) -> Address;
 overlay_address(#{overlay := Address}) -> Address.
 
-transport_address({transport, Address}) -> Address;
-transport_address({compound, #{transport := Address}}) -> Address.
-
 set_of(undefined) -> [];
 set_of(Element) -> [Element].
+
+maybe_send(none, _) -> ok;
+maybe_send(Client, Result) -> Client ! Result.
