@@ -2,6 +2,7 @@
 -export_type([ref/0, ctx/0, address/0]).
 -export([
 	open/2,
+	info/2,
 	send/4,
 	recv_async/1,
 	close/1,
@@ -34,6 +35,10 @@
 	Ref :: term(),
 	Reason :: term().
 
+-callback info
+	(Ref, address) -> term() when
+	Ref :: term().
+
 -callback send(Ref, Address, Id, Body) -> any() when
 	Ref :: term(),
 	Address :: term(),
@@ -63,6 +68,9 @@ open(
 		{ok, Ref} -> {ok, {Module, Ref}};
 		{error, _} = Err -> Err
 	end.
+
+-spec info(ref(), address) -> address().
+info({Module, Ref}, address) -> {Module, Module:info(Ref, address)}.
 
 -spec send(ref(), address(), term(), horde:message_body()) -> ok.
 send({Module, Ref}, {Module, Address}, Id, Body) ->

@@ -24,15 +24,16 @@ end_per_testcase(_Testcase, _Config) ->
 bootstrap(_Config) ->
 	meck:expect(horde_mock, start_timer,
 		fun(_Timeout, Dest, Message) ->
-			erlang:send_after(1, Dest, Message)
+			erlang:start_timer(0, Dest, Message)
 		end
 	),
 	meck:expect(horde_mock, cancel_timer, fun erlang:cancel_timer/1),
 
 	{ok, BootstrapNode} = create_node(),
-	{horde_disterl, BootstrapAddress} = horde:info(BootstrapNode, transport),
+	Transport = horde:info(BootstrapNode, transport),
+	BootstrapAddress = horde_transport:info(Transport, address),
 	NumNodes = 16,
-	BootstrapNodes = [{transport, {horde_disterl, BootstrapAddress}}],
+	BootstrapNodes = [{transport, BootstrapAddress}],
 	Nodes = lists:map(
 		fun(_) ->
 			{ok, Pid} = create_node(),

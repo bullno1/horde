@@ -124,6 +124,7 @@ lookup(Ref, Address, Timeout) ->
 	(ref(), ring) -> horde_ring:ring(overlay_address(), node_info());
 	(ref(), successor) -> node_info() | undefined;
 	(ref(), predecessor) -> node_info() | undefined;
+	(ref(), address) -> overlay_address();
 	(ref(), transport) -> horde_transport:ref().
 info(Ref, Info) -> gen_server:call(Ref, {info, Info}).
 
@@ -132,6 +133,7 @@ info(Ref, Info) -> gen_server:call(Ref, {info, Info}).
 	ring := horde_ring:ring(overlay_address(), node_info()),
 	transport := horde_transport:ref(),
 	successor := node_info() | undefined,
+	address := overlay_address(),
 	predecessor := node_info() | undefined
 }.
 info(Ref) -> gen_server:call(Ref, info).
@@ -171,7 +173,7 @@ init(#{
 			RingCheckInterval = maps:get(ring_check_interval, Opts, 60000),
 			%RingCheckTimer = start_timer(RingCheckInterval, check_ring),
 			MaxAddress = horde_crypto:info(Crypto, max_address),
-			RevFun = fun(Addr) -> MaxAddress - Addr end,
+			RevFun = fun(Addr) when is_integer(Addr) -> MaxAddress - Addr end,
 			State = #state{
 				crypto = Crypto,
 				address = OverlayAddress,
@@ -595,7 +597,7 @@ maybe_remove_node(
 		predecessor = Predecessor
 	} = State
 ) ->
-	Ring2 = horde_ring:remove(RemovedAddress, Ring),
+	Ring2 = horde_ring:remove(overlay_address(RemovedAddress), Ring),
 	State2 = State#state{
 		ring = Ring2,
 		predecessor = undefined_if_removed(RemovedAddress, Predecessor),
@@ -631,7 +633,7 @@ extract_info(What, State) ->
 	element(proplists:get_value(What, AllowedIndices), State).
 
 readable_fields() ->
-	[status, transport, ring, successor, predecessor].
+	[status, transport, ring, successor, predecessor, address].
 
 notify_join_status(#state{status = Status, join_waiters = Waiters} = State) ->
 	_ = [gen_server:reply(Waiter, Status =:= ready) || Waiter <- Waiters],
@@ -668,11 +670,11 @@ format_record(Type, Record) ->
 	]).
 
 format_field(state, ring, Ring) ->
-	horde_ring:size(Ring);
+	{horde_ring, horde_ring:size(Ring)};
 format_field(state, keypair, {PK, _SK}) ->
 	{base64:encode(PK), <<>>};
 format_field(state, queries, Queries) ->
-	maps:size(Queries);
+	{queries, maps:size(Queries)};
 format_field(_Type, _Key, Value) -> Value.
 
 rec_info(size, state) -> record_info(size, state);

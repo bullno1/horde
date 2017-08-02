@@ -4,6 +4,7 @@
 % horde_transport
 -export([
 	open/2,
+	info/2,
 	send/4,
 	recv_async/1,
 	close/1
@@ -25,6 +26,8 @@
 % horde_transport
 open(Ctx, Opts) -> gen_server:start_link(?MODULE, {Ctx, Opts}, []).
 
+info(Ref, Info) -> gen_server:call(Ref, {info, Info}).
+
 send(Ref, Address, Id, Body) -> gen_server:cast(Ref, {send, Address, Id, Body}).
 
 recv_async(Ref) -> gen_server:cast(Ref, recv_async).
@@ -41,7 +44,10 @@ init({Ctx, Opts}) ->
 	},
 	{ok, State}.
 
-handle_call(close, _, State) -> {stop, normal, ok, State}.
+handle_call({info, address}, _, State) ->
+	{reply, self(), State};
+handle_call(close, _, State) ->
+	{stop, normal, ok, State}.
 
 handle_cast({send, Address, Id, Body}, #state{address = OwnAddress} = State) ->
 	Header = #{
