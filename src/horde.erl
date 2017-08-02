@@ -299,9 +299,9 @@ handle_overlay_message(
 	#{from := Address, timestamp := Timestamp} = Header, Body,
 	State
 ) ->
+	State2 = handle_overlay_message1(Header, Body, State),
 	Node = #{address => Address, last_seen => Timestamp, source => direct},
-	State2 = add_node(Node, State),
-	handle_overlay_message1(Header, Body, State2).
+	add_node(Node, State2).
 
 handle_overlay_message1(
 	#{from := Sender} = Header, {lookup, TargetAddress},
@@ -351,15 +351,15 @@ handle_overlay_message1(
 handle_overlay_message1(
 	#{id := Id} = Header, {peer_info, Peers} = Message, State
 ) ->
-	State2 = lists:foldl(
-		fun(Peer, Acc) -> add_node(Peer#{source => indirect}, Acc) end,
-		State,
-		Peers
-	),
-	dispatch_query_event(
+	State2 = dispatch_query_event(
 		{Header, Message},
 		fun handle_query_reply/4,
-		Id, State2
+		Id, State
+	),
+	lists:foldl(
+		fun(Peer, Acc) -> add_node(Peer#{source => indirect}, Acc) end,
+		State2,
+		Peers
 	).
 
 reply(
