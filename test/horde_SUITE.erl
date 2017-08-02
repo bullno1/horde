@@ -35,6 +35,8 @@ no_self_join(_Config) ->
 	false = horde:join(Node, [{transport, TransportAddress}], infinity),
 	horde:stop(Node).
 
+bootstrap() -> [{timetrap, 3000}].
+
 bootstrap(_Config) ->
 	meck:expect(horde_mock, start_timer,
 		fun(_Timeout, Dest, Message) ->
@@ -43,11 +45,7 @@ bootstrap(_Config) ->
 	),
 	meck:expect(horde_mock, cancel_timer, fun erlang:cancel_timer/1),
 
-	{ok, BootstrapNode} = create_node(),
-	Transport = horde:info(BootstrapNode, transport),
-	BootstrapAddress = horde_transport:info(Transport, address),
-	NumNodes = 32,
-	BootstrapNodes = [{transport, BootstrapAddress}],
+	NumNodes = 64,
 	Nodes = lists:map(
 		fun(_) ->
 			{ok, Pid} = create_node(),
@@ -59,8 +57,28 @@ bootstrap(_Config) ->
 		fun(Node) -> standalone =:= horde:info(Node, status) end,
 		Nodes
 	),
+
+	[BootstrapNode | _] = Nodes,
+	Transport = horde:info(BootstrapNode, transport),
+	BootstrapAddress = horde_transport:info(Transport, address),
+	BootstrapNodes = [{transport, BootstrapAddress}],
+	%horde_disterl:set_message_allowed(false),
 	true = lists:all(
-		fun(Node) -> horde:join(Node, BootstrapNodes, infinity) end,
+		fun(Node) ->
+			%horde_disterl:set_message_allowed(true),
+			Joined = horde:join(Node, BootstrapNodes, infinity),
+			%horde_disterl:set_message_allowed(false),
+			Joined
+		end,
+		tl(Nodes)
+	),
+	% A node's ring must not contains itself
+	true = lists:all(
+		fun(Node) ->
+			Ring = horde:info(Node, ring),
+			OverlayAddress = horde:info(Node, address),
+			horde_ring:lookup(OverlayAddress, Ring) =:= none
+		end,
 		Nodes
 	),
 	true = lists:all(
@@ -83,7 +101,6 @@ bootstrap(_Config) ->
 		Nodes
 	),
 	_ = [horde:stop(Node) || Node <- Nodes],
-	horde:stop(BootstrapNode),
 	ok.
 
 create_node() -> create_node(#{}).

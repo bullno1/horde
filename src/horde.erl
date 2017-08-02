@@ -86,7 +86,7 @@
 	max_address :: overlay_address(),
 	keypair :: horde_crypto:keypair(),
 	transport :: horde_transport:ref(),
-	status = standalone :: standalone | {joining, reference()} | ready,
+	status = standalone :: standalone | {joining, reference()} | joining2 | ready,
 	join_waiters = [] :: list(),
 	queries = #{} :: #{reference() => #query{}},
 	successor :: node_info() | undefined,
@@ -255,44 +255,8 @@ handle_cast(
 	State3 = State2#state{num_nodes_probed = NumNodesProbed + 1},
 	{noreply, State3}.
 
-handle_info(
-	{'DOWN', BootstrapRef, process, _, normal},
-	#state{
-		status = {joining, BootstrapRef},
-		predecessor = Predecessor,
-		successor = Successor
-	} = State
-) when Predecessor =/= undefined, Successor =/= undefined ->
-	{noreply, notify_join_status(State#state{status = ready})};
-handle_info(
-	{'DOWN', BootstrapRef, process, _, _},
-	#state{status = {joining, BootstrapRef}} = State
-) ->
-	{noreply, notify_join_status(State#state{status = standalone})};
-handle_info({timeout, _, {query_timeout, Id}} = Event, State) ->
-	State2 = dispatch_query_event(
-		Event, fun handle_query_error/4, Id, State
-	),
-	{noreply, State2};
-handle_info(
-	{horde_transport, Transport, {message, Header, Body}},
-	#state{transport = Transport} = State
-) ->
-	State2 = handle_overlay_message(Header, Body, State),
-	horde_transport:recv_async(Transport),
-	{noreply, State2};
-handle_info(
-	{horde_transport, Transport, {transport_error, _, Id} = Error},
-	#state{transport = Transport} = State
-) ->
-	State2 = dispatch_query_event(Error, fun handle_query_error/4, Id, State),
-	{noreply, State2};
 handle_info(Msg, State) ->
-	error_logger:warning_report([
-		{?MODULE, "Unexpected message"},
-		{message, Msg}
-	]),
-	{noreply, State}.
+	{noreply, check_join_status(handle_info1(Msg, State))}.
 
 terminate(_Reason, #state{transport = Transport}) ->
 	_ = horde_transport:close(Transport),
@@ -335,9 +299,9 @@ handle_overlay_message(
 	#{from := Address, timestamp := Timestamp} = Header, Body,
 	State
 ) ->
-	State2 = handle_overlay_message1(Header, Body, State),
 	Node = #{address => Address, last_seen => Timestamp, source => direct},
-	add_node(Node, State2).
+	State2 = add_node(Node, State),
+	handle_overlay_message1(Header, Body, State2).
 
 handle_overlay_message1(
 	#{from := Sender} = Header, {lookup, TargetAddress},
@@ -387,15 +351,15 @@ handle_overlay_message1(
 handle_overlay_message1(
 	#{id := Id} = Header, {peer_info, Peers} = Message, State
 ) ->
-	State2 = dispatch_query_event(
+	State2 = lists:foldl(
+		fun(Peer, Acc) -> add_node(Peer#{source => indirect}, Acc) end,
+		State,
+		Peers
+	),
+	dispatch_query_event(
 		{Header, Message},
 		fun handle_query_reply/4,
-		Id, State
-	),
-	lists:foldl(
-		fun(Peer, Acc) -> add_node(Peer#{source => indirect}, Acc) end,
-		State2,
-		Peers
+		Id, State2
 	).
 
 reply(
@@ -408,8 +372,10 @@ reply(
 
 dispatch_query_event(Event, Handler, Id, #state{queries = Queries} = State) ->
 	case maps:find(Id, Queries) of
-		{ok, Query} -> Handler(Event, Id, Query, State);
-		error -> State
+		{ok, Query} ->
+			Handler(Event, Id, Query, State);
+		error ->
+			State
 	end.
 
 handle_query_reply(
@@ -578,6 +544,107 @@ maybe_set_neighbour(successor, #{source := direct} = Node, State) ->
 maybe_set_neighbour(predecessor, #{source := direct} = Node, State) ->
 	State#state{predecessor = Node}.
 
+handle_info1(
+	{'DOWN', BootstrapRef, process, _, normal},
+	#state{status = {joining, BootstrapRef}} = State
+) ->
+	State#state{status = joining2};
+handle_info1({timeout, _, {query_timeout, Id}} = Event, State) ->
+	dispatch_query_event(Event, fun handle_query_error/4, Id, State);
+handle_info1(
+	{horde_transport, Transport, {message, Header, Body}},
+	#state{transport = Transport} = State
+) ->
+	State2 = handle_overlay_message(Header, Body, State),
+	horde_transport:recv_async(Transport),
+	State2;
+handle_info1(
+	{horde_transport, Transport, {transport_error, _, Id} = Error},
+	#state{transport = Transport} = State
+) ->
+	dispatch_query_event(Error, fun handle_query_error/4, Id, State);
+handle_info1(Msg, State) ->
+	error_logger:warning_report([
+		{?MODULE, "Unexpected message"},
+		{message, Msg}
+	]),
+	State.
+
+check_join_status(#state{status = OldStatus} = State) ->
+	NewStatus = join_status(State),
+	case NewStatus =/= OldStatus of
+		true ->
+			notify_join_status(State#state{status = NewStatus});
+		false ->
+			State
+	end.
+
+join_status(
+	#state{
+		status = standalone,
+		successor = Successor,
+		predecessor = Predecessor
+	}
+) when Successor =/= undefined, Predecessor =/= undefined ->
+	% Passive join
+	ready;
+join_status(
+	#state{
+		status = joining2 = Status,
+		queries = Queries,
+		successor = Successor,
+		predecessor = Predecessor
+	}
+) ->
+	% Active join
+	NumPings = lists:foldl(
+		fun(#query{message = Message}, Acc) ->
+			case Message of
+				ping -> Acc + 1;
+				_ -> Acc
+			end
+		end,
+		0,
+		maps:values(Queries)
+	),
+	FinishedBootstrapping = NumPings =:= 0,
+	FoundNeighbours = Successor =/= undefined andalso Predecessor =/= undefined,
+	if
+		FinishedBootstrapping and FoundNeighbours ->
+			ready;
+		FinishedBootstrapping and not FoundNeighbours ->
+			standalone;
+		true ->
+			Status
+	end;
+join_status(
+	#state{
+		status = ready = Status,
+		ring = Ring,
+		queries = Queries,
+		successor = Successor,
+		predecessor = Predecessor
+	}
+) ->
+	% Terrible network condition
+	NumQueries = maps:size(Queries),
+	RingSize = horde_ring:size(Ring),
+	LeftHorde = true
+		andalso NumQueries =:= 0
+		andalso RingSize =:= 0
+		andalso Successor =:= undefined
+		andalso Predecessor =:= undefined,
+	case LeftHorde of
+		true -> standalone;
+		false -> Status
+	end;
+join_status(#state{status = Status}) ->
+	Status.
+
+notify_join_status(#state{status = Status, join_waiters = Waiters} = State) ->
+	_ = [gen_server:reply(Waiter, Status =:= ready) || Waiter <- Waiters],
+	State#state{join_waiters = []}.
+
 is_querying(Address, Queries) ->
 	lists:any(
 		fun(#query{destination = Destination}) ->
@@ -635,12 +702,6 @@ extract_info(What, State) ->
 readable_fields() ->
 	[status, transport, ring, successor, predecessor, address].
 
-notify_join_status(#state{status = Status, join_waiters = Waiters} = State) ->
-	_ = [gen_server:reply(Waiter, Status =:= ready) || Waiter <- Waiters],
-	State#state{join_waiters = []}.
-
-maybe_add_join_waiter(_Waiter, #state{status = ready} = State) ->
-	{reply, ready, State};
 maybe_add_join_waiter(Waiter, #state{join_waiters = Waiters} = State) ->
 	{noreply, State#state{join_waiters = [Waiter | Waiters]}}.
 

@@ -80,7 +80,7 @@ handle_info(Msg, State) ->
 
 % Private
 
-distance({transport, _}, _, _) -> 0;
+distance({transport, _}, _, MaxAddress) -> MaxAddress;
 distance({compound, #{overlay := From}}, To, MaxAddress) ->
 	min(
 		abs(To - From),
