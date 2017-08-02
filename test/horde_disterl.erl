@@ -50,6 +50,7 @@ handle_call(close, _, State) ->
 	{stop, normal, ok, State}.
 
 handle_cast({send, Address, Id, Body}, #state{address = OwnAddress} = State) ->
+	verify_msg(Body),
 	Header = #{
 		from => OwnAddress,
 		id => Id,
@@ -72,3 +73,23 @@ handle_info({?MODULE, Event}, #state{active = Active, ctx = Ctx} = State) ->
 		end,
 	horde_transport:notify(Ctx, self(), Event),
 	{noreply, State#state{active = NextActive}}.
+
+% Private
+
+verify_msg({peer_info, Peers}) ->
+	true = lists:all(
+		fun(Peer) -> error =:= maps:find(source, Peer) end,
+		Peers
+	),
+	Addresses = [OverlayAddress || #{address := #{overlay := OverlayAddress}} <- Peers],
+	Length = length(Addresses),
+	Length2 = length(lists:usort(Addresses)),
+	case Length =:= Length2 of
+		true ->
+			ok;
+		false ->
+			ct:pal("Peers = ~p", [Peers]),
+			exit(duplicate)
+	end;
+verify_msg(_) ->
+	ok.

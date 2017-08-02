@@ -14,7 +14,7 @@ end_per_suite(Config) ->
 	ok.
 
 init_per_testcase(_Testcase, Config) ->
-	meck:new([horde_mock], [non_strict]),
+	meck:new([horde_mock], [non_strict, no_history]),
 	Config.
 
 end_per_testcase(_Testcase, _Config) ->
@@ -39,11 +39,9 @@ bootstrap() -> [{timetrap, 5000}].
 
 bootstrap(_Config) ->
 	meck:expect(horde_mock, start_timer,
-		fun(_Timeout, Dest, Message) ->
-			erlang:start_timer(0, Dest, Message)
-		end
+		fun(_Timeout, _Dest, _Message) -> make_ref() end
 	),
-	meck:expect(horde_mock, cancel_timer, fun erlang:cancel_timer/1),
+	meck:expect(horde_mock, cancel_timer, fun(_) -> ok end),
 
 	NumNodes = 128,
 	Nodes = lists:map(

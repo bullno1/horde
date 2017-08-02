@@ -219,7 +219,7 @@ handle_call(
 		num_neighbours = NumNeighbours
 	} = State
 ) ->
-	Peers = ordsets:union([
+	Peers = nodeset([
 		horde_ring:successors(Address, 1, Ring),
 		horde_ring:predecessors(Address, NumParallelQueries - 1, Ring),
 		horde_ring:successors(OwnAddress, NumNeighbours, Ring),
@@ -320,7 +320,7 @@ handle_overlay_message1(
 	Nodes = case horde_ring:lookup(TargetAddress, Ring) of
 		% If node is known, reply with info and own immediate predecessor
 		{value, Node} ->
-			ordsets:add_element(Node, set_of(OwnPredecessor));
+			nodeset([[Node], set_of(OwnPredecessor)]);
 		% If node is not known, reply with a closer immediate neighbour and
 		% a number of "next best hops" around the target.
 		none ->
@@ -333,7 +333,7 @@ handle_overlay_message1(
 					true -> {OwnSuccessor, 1, NumNextHops - 1};
 					false -> {OwnPredecessor, NumNextHops - 1, 1}
 				end,
-			ordsets:union([
+			nodeset([
 				set_of(CloserNeighbour),
 				horde_ring:successors(TargetAddress, NumSuccessors, Ring),
 				horde_ring:predecessors(TargetAddress, NumPredecessors, Ring)
@@ -347,10 +347,10 @@ handle_overlay_message1(
 		num_neighbours = NumNeighbours
 	} = State
 ) ->
-	Nodes = ordsets:union(
+	Nodes = nodeset([
 		horde_ring:successors(OwnAddress, NumNeighbours, Ring),
 		horde_ring:predecessors(OwnAddress, NumNeighbours, Ring)
-	),
+	]),
 	reply(Header, {peer_info, Nodes}, State);
 handle_overlay_message1(
 	#{id := Id} = Header, {peer_info, Peers} = Message, State
@@ -733,6 +733,29 @@ cancel_timer(TimerRef) ->
 	_ = erlang:cancel_timer(TimerRef, [{async, true}]),
 	ok.
 -endif.
+
+nodeset(Sets) ->
+	gb_trees:values(
+		lists:foldl(fun nodeset_add_set/2, gb_trees:empty(), Sets)
+	).
+
+nodeset_add_set(Set, Tree) ->
+	lists:foldl(fun nodeset_add_node/2, Tree, Set).
+
+nodeset_add_node(
+	#{address := #{overlay := Address},
+	  last_seen := Timestamp} = Node,
+	Tree
+) ->
+	StrippedNode = maps:remove(source, Node),
+	case gb_trees:lookup(Address, Tree) of
+		{value, #{last_seen := OldTimestamp}} when OldTimestamp < Timestamp ->
+			gb_trees:update(Address, StrippedNode, Tree);
+		none ->
+			gb_trees:insert(Address, StrippedNode, Tree);
+		_ ->
+			Tree
+	end.
 
 format_record(Type, Record) ->
 	Indices = lists:zip(
