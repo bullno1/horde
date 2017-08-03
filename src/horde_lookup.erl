@@ -82,10 +82,7 @@ handle_info(Msg, State) ->
 
 distance({transport, _}, _, MaxAddress) -> MaxAddress;
 distance({compound, #{overlay := From}}, To, MaxAddress) ->
-	min(
-		abs(To - From),
-		MaxAddress + 1 - max(From, To) + min(From, To)
-	).
+	min(abs(To - From), MaxAddress + 1 - max(From, To) + min(From, To)).
 
 add_next_peers(
 	Peers,
