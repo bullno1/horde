@@ -3,7 +3,7 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
-all() -> [crypto, address].
+all() -> [horde_address_spec, crypto, address].
 
 init_per_suite(Config) ->
 	{ok, Apps} = application:ensure_all_started(horde),
@@ -60,3 +60,6 @@ address(_Config) ->
 	?assertEqual(true, horde_address:is_between(5, 5, 10, LTE, LTE)),
 
 	ok.
+
+horde_address_spec(_Config) ->
+	?assertEqual([], proper:check_specs(horde_address, [{to_file, user}])).
