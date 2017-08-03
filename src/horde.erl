@@ -10,7 +10,8 @@
 	join_async/2,
 	stop/1,
 	wait_join/2,
-	send_query/3
+	send_query/3,
+	query_info/2
 ]).
 % gen_server
 -export([
@@ -32,6 +33,11 @@
 	message_body/0
 ]).
 -compile({inline, [readable_fields/0]}).
+-ifdef(TEST).
+-define(TIME, fake_time).
+-else.
+-define(TIME, erlang).
+-endif.
 
 -type overlay_address() :: non_neg_integer().
 -type compound_address() :: #{
@@ -93,7 +99,7 @@
 	successor :: node_info() | undefined,
 	predecessor :: node_info() | undefined,
 	ring :: horde_ring:ring(overlay_address(), node_info()),
-	%ring_check_timer :: reference(),
+	ring_check_timer :: reference(),
 	ring_check_interval :: non_neg_integer(),
 	num_nodes_probed = 0 :: non_neg_integer(),
 	num_nodes_failed = 0 :: non_neg_integer(),
@@ -128,6 +134,15 @@ lookup(Ref, Address, Timeout) ->
 	(ref(), address) -> compound_address();
 	(ref(), transport) -> horde_transport:ref().
 info(Ref, Info) -> gen_server:call(Ref, {info, Info}).
+
+-spec query_info(ref(), reference()) -> #{
+	sender := pid() | none,
+	destination := endpoint(),
+	message := message_body(),
+	num_retries := non_neg_integer(),
+	timer := reference() | undefined
+} | undefined.
+query_info(Ref, QueryRef) -> gen_server:call(Ref,  {query_info, QueryRef}).
 
 -spec join(ref(), [endpoint()], timeout()) -> boolean().
 join(Ref, BootstrapNodes, Timeout) ->
@@ -167,7 +182,7 @@ init(#{
 			horde_transport:recv_async(Transport),
 			OverlayAddress = horde_crypto:address_of(Crypto, PubKey),
 			RingCheckInterval = maps:get(ring_check_interval, Opts, 60000),
-			%RingCheckTimer = start_timer(RingCheckInterval, check_ring),
+			RingCheckTimer = ?TIME:start_timer(RingCheckInterval, self(), check_ring),
 			MaxAddress = horde_crypto:info(Crypto, max_address),
 			RevFun = fun(Addr) when is_integer(Addr) -> MaxAddress - Addr end,
 			State = #state{
@@ -177,7 +192,7 @@ init(#{
 				keypair = KeyPair,
 				transport = Transport,
 				ring = horde_ring:new(RevFun),
-				%ring_check_timer = RingCheckTimer,
+				ring_check_timer = RingCheckTimer,
 				ring_check_interval = RingCheckInterval,
 				query_timeout = maps:get(query_timeout, Opts, 5000),
 				num_retries = maps:get(num_retries, Opts, 3),
@@ -227,6 +242,20 @@ handle_call(
 	LookupPeers = [{compound, Addr} || #{address := Addr} <- Peers],
 	_ = start_lookup(Address, LookupPeers, From, State),
 	{noreply, State};
+handle_call({query_info, QueryRef}, _From, #state{queries = Queries} = State) ->
+	Result =
+		case maps:find(QueryRef, Queries) of
+			{ok, Query} ->
+				maps:from_list(
+					lists:zip(
+						record_info(fields, query),
+						tl(tuple_to_list(Query))
+					)
+				);
+			error ->
+				undefined
+		end,
+	{reply, Result, State};
 handle_call({info, What}, _From, State) ->
 	{reply, extract_info(What, State), State}.
 
@@ -295,6 +324,29 @@ start_lookup(
 		num_parallel_queries => NumParallelQueries
 	},
 	horde_lookup:start_link(LookupArgs).
+
+maybe_ping(
+	Address,
+	#state{queries = Queries, num_retries = NumRetries} = State
+) ->
+	IsQueryingAddress = lists:any(
+		fun(#query{destination = Destination}) ->
+			Destination =:= Address
+		end,
+		maps:values(Queries)
+	),
+	case IsQueryingAddress of
+		true ->
+			State;
+		false ->
+			Query = #query{
+				sender = none,
+				destination = Address,
+				message = ping,
+				num_retries = NumRetries
+			},
+			send_query1(make_ref(), Query, State)
+	end.
 
 handle_overlay_message(
 	#{from := Address, timestamp := Timestamp} = Header, Body,
@@ -409,7 +461,7 @@ handle_query_reply(
 	case IsCorrectReply of
 		true ->
 			_ = maybe_send(Sender, {?MODULE, Id, {reply, Message}}),
-			cancel_timer(Timer),
+			_ = ?TIME:cancel_timer(Timer),
 			State#state{queries = maps:remove(Id, Queries)};
 		false ->
 			State
@@ -451,9 +503,9 @@ handle_transport_error(
 	Id, #query{timer = TimerRef} = Query,
 	#state{queries = Queries, retry_delay = RetryDelay} = State
 ) ->
-	cancel_timer(TimerRef),
+	_ = ?TIME:cancel_timer(TimerRef),
 	Query2 = Query#query{
-		timer = start_timer(RetryDelay, {query_timeout, Id})
+		timer = ?TIME:start_timer(RetryDelay, self(), {query_timeout, Id})
 	},
 	State#state{
 		queries = Queries#{Id := Query2}
@@ -475,7 +527,7 @@ send_query1(
 		end,
 	horde_transport:send(Transport, TransportAddress, Id, Message),
 	Query2 = Query#query{
-		timer = start_timer(QueryTimeout, {query_timeout, Id})
+		timer = ?TIME:start_timer(QueryTimeout, self(), {query_timeout, Id})
 	},
 	State#state{
 		queries = Queries#{Id => Query2}
@@ -561,23 +613,8 @@ maybe_update_neighbour(
 		false -> State
 	end.
 
-maybe_set_neighbour(
-	_Postion,
-	#{address := Address, source := indirect},
-	#state{queries = Queries, num_retries = NumRetries} = State
-) ->
-	case is_querying(Address, Queries) of
-		true ->
-			State;
-		false ->
-			Query = #query{
-				sender = none,
-				destination = {compound, Address},
-				message = ping,
-				num_retries = NumRetries
-			},
-			send_query1(make_ref(), Query, State)
-	end;
+maybe_set_neighbour(_, #{address := Address, source := indirect}, State) ->
+	maybe_ping({compound, Address}, State);
 maybe_set_neighbour(successor, #{source := direct} = Node, State) ->
 	State#state{successor = Node};
 maybe_set_neighbour(predecessor, #{source := direct} = Node, State) ->
@@ -588,6 +625,15 @@ handle_info1(
 	#state{status = {joining, BootstrapRef}} = State
 ) ->
 	State#state{status = joining2};
+handle_info1(
+	{timeout, RingCheckTimer, check_ring},
+	#state{
+		ring_check_timer = RingCheckTimer,
+		ring_check_interval = RingCheckInterval
+	} = State
+) ->
+	State2 = State,%check_ring(State),
+	State2#state{ring_check_timer = ?TIME:start_timer(RingCheckInterval, self(), check_ring)};
 handle_info1({timeout, _, {query_timeout, Id}} = Event, State) ->
 	dispatch_query_event(Event, fun handle_query_error/4, Id, State);
 handle_info1(
@@ -684,13 +730,19 @@ notify_join_status(#state{status = Status, join_waiters = Waiters} = State) ->
 	_ = [gen_server:reply(Waiter, Status =:= ready) || Waiter <- Waiters],
 	State#state{join_waiters = []}.
 
-is_querying(Address, Queries) ->
-	lists:any(
-		fun(#query{destination = Destination}) ->
-			Destination =:= {compound, Address}
-		end,
-		maps:values(Queries)
-	).
+check_ring(
+	#state{
+		successor = Successor,
+		predecessor = Predecessor
+	} = State
+) ->
+	State2 = maybe_ping_neighbour(Successor, State),
+	maybe_ping_neighbour(Predecessor, State2).
+
+maybe_ping_neighbour(undefined, State) ->
+	State;
+maybe_ping_neighbour(#{address := Address}, State) ->
+	maybe_ping({compound, Address}, State).
 
 maybe_remove_node({transport, _}, State) ->
 	State;
@@ -741,21 +793,6 @@ extract_info(What, State) ->
 
 readable_fields() ->
 	[status, transport, ring, successor, predecessor, address].
-
--ifdef(TEST).
-start_timer(Timeout, Message) ->
-	horde_mock:start_timer(Timeout, self(), Message).
-
-cancel_timer(TimerRef) ->
-	_ = horde_mock:cancel_timer(TimerRef), ok.
--else.
-start_timer(Timeout, Message) ->
-	erlang:start_timer(Timeout, self(), Message).
-
-cancel_timer(TimerRef) ->
-	_ = erlang:cancel_timer(TimerRef, [{async, true}]),
-	ok.
--endif.
 
 nodeset(Sets) ->
 	gb_trees:values(

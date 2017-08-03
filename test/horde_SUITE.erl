@@ -3,7 +3,7 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
-all() -> [bootstrap, no_self_join].
+all() -> [props, bootstrap, no_self_join].
 
 init_per_suite(Config) ->
 	{ok, Apps} = application:ensure_all_started(horde),
@@ -15,32 +15,25 @@ end_per_suite(Config) ->
 	ok.
 
 init_per_testcase(_Testcase, Config) ->
-	meck:new([horde_mock], [non_strict, no_history]),
+	fake_time:start_link(),
 	Config.
 
 end_per_testcase(_Testcase, _Config) ->
-	meck:unload([horde_mock]),
+	fake_time:stop(),
 	ok.
 
 no_self_join(_Config) ->
-	meck:expect(horde_mock, start_timer,
-		fun(_Timeout, _Dest, _Message) -> make_ref() end
-	),
-	meck:expect(horde_mock, cancel_timer, fun(_) -> ok end),
-
 	{ok, Node} = create_node(),
 	#{transport := TransportAddress} = horde:info(Node, address),
 	?assertEqual(false, horde:join(Node, [{transport, TransportAddress}], infinity)),
 	horde:stop(Node).
 
+props(_Config) ->
+	?assertEqual([], proper:module(horde_prop, [1000, {to_file, user}])).
+
 bootstrap() -> [{timetrap, 5000}].
 
 bootstrap(_Config) ->
-	meck:expect(horde_mock, start_timer,
-		fun(_Timeout, _Dest, _Message) -> make_ref() end
-	),
-	meck:expect(horde_mock, cancel_timer, fun(_) -> ok end),
-
 	NumNodes = 128,
 	Nodes = lists:map(
 		fun(_) ->
