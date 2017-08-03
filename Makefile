@@ -19,3 +19,4 @@ CT_OPTS += -ct_hooks cth_readable_shell
 include erlang.mk
 
 all:: rebar.config
+check:: elvis
