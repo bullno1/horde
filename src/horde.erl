@@ -508,12 +508,34 @@ maybe_update_neighbour(Position, [Node], State) ->
 	maybe_update_neighbour(Position, Node, State);
 maybe_update_neighbour(
 	predecessor, Node, #state{predecessor = undefined} = State
-) when is_map(Node) ->
+) ->
 	maybe_set_neighbour(predecessor, Node, State);
 maybe_update_neighbour(
 	successor, Node, #state{successor = undefined} = State
-) when is_map(Node) ->
+) ->
 	maybe_set_neighbour(successor, Node, State);
+maybe_update_neighbour(
+	successor,
+	#{address := Address, last_seen := NewTimestamp},
+	#state{
+		successor = #{
+			address := Address,
+			last_seen := OldTimestamp
+		} = Successor
+	} = State
+) when NewTimestamp > OldTimestamp ->
+	State#state{successor = Successor#{last_seen := NewTimestamp}};
+maybe_update_neighbour(
+	predecessor,
+	#{address := Address, last_seen := NewTimestamp},
+	#state{
+		predecessor = #{
+			address := Address,
+			last_seen := OldTimestamp
+		} = Predecessor
+	} = State
+) when NewTimestamp > OldTimestamp ->
+	State#state{predecessor = Predecessor#{last_seen := NewTimestamp}};
 maybe_update_neighbour(
 	predecessor, Node,
 	#state{address = OwnAddress, predecessor = Predecessor} = State

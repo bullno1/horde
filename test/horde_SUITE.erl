@@ -87,13 +87,22 @@ bootstrap(_Config) ->
 		),
 	lists:foreach(
 		fun(Node) ->
-			#{address := SuccessorAddress} = horde:info(Node, successor),
-			#{address := PredecessorAddress} = horde:info(Node, predecessor),
+			Successor = #{address := SuccessorAddress} = horde:info(Node, successor),
+			Predecessor = #{address := PredecessorAddress} = horde:info(Node, predecessor),
 			#{overlay := OverlayAddress} = horde:info(Node, address),
 			[SuccessorNode] = horde_ring:successors(OverlayAddress, 1, FullRing),
 			[PredecessorNode] = horde_ring:predecessors(OverlayAddress, 1, FullRing),
-			SuccessorAddress = horde:info(SuccessorNode, address),
-			PredecessorAddress = horde:info(PredecessorNode, address)
+			?assertEqual(SuccessorAddress, horde:info(SuccessorNode, address)),
+			?assertEqual(PredecessorAddress, horde:info(PredecessorNode, address)),
+
+			% Neighbour pointers must be kept up-to-date
+			NodeRing = horde:info(Node, ring),
+			[RingSuccessor] = horde_ring:successors(OverlayAddress, 1, NodeRing),
+			[RingPredecessor] = horde_ring:predecessors(OverlayAddress, 1, NodeRing),
+			?assertEqual(maps:get(address, RingSuccessor), maps:get(address, Successor)),
+			?assertEqual(maps:get(address, RingPredecessor), maps:get(address, Predecessor)),
+			?assert(maps:get(last_seen, Successor) >= maps:get(last_seen, RingSuccessor)),
+			?assert(maps:get(last_seen, Predecessor) >= maps:get(last_seen, RingPredecessor))
 		end,
 		Nodes
 	),
