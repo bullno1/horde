@@ -124,6 +124,6 @@ create_node(Opts) ->
 	DefaultOpts = #{
 		crypto => Crypto,
 		keypair => horde_crypto:generate_keypair(Crypto),
-		transport => {horde_disterl, #{active => true}}
+		transport => {horde_disterl, #{active => false}}
 	},
 	horde:start_link(maps:merge(DefaultOpts, Opts)).

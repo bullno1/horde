@@ -20,6 +20,7 @@
 -record(state, {
 	ctx :: horde_transport:ctx(),
 	address :: horde:compound_address(),
+	msg_q = queue:new() :: queue:queue(),
 	active = false :: boolean() | once
 }).
 
@@ -54,25 +55,29 @@ handle_cast({send, Address, Id, Body}, #state{address = OwnAddress} = State) ->
 	Header = #{
 		from => OwnAddress,
 		id => Id,
-		timestamp => erlang:system_time(seconds)
+		timestamp => erlang:unique_integer([positive, monotonic])
 	},
 	Address ! {?MODULE, {message, Header, Body}},
 	{noreply, State};
-handle_cast(recv_async, #state{active = false} = State) ->
-	{noreply, State#state{active = once}};
+handle_cast(recv_async, #state{ctx = Ctx, active = false, msg_q = MsgQ} = State) ->
+	case queue:out(MsgQ) of
+		{{value, Event}, MsgQ2} ->
+			horde_transport:notify(Ctx, self(), Event),
+			{noreply, State#state{msg_q = MsgQ2}};
+		{empty, _} ->
+			{noreply, State#state{active = once}}
+	end;
 handle_cast(recv_async, State) ->
 	{noreply, State}.
 
-handle_info({?MODULE, _Event}, #state{active = false} = State) ->
-	{noreply, State};
-handle_info({?MODULE, Event}, #state{active = Active, ctx = Ctx} = State) ->
-	NextActive =
-		case Active of
-			true -> true;
-			once -> false
-		end,
+handle_info({?MODULE, Event}, #state{ctx = Ctx, active = true} = State) ->
 	horde_transport:notify(Ctx, self(), Event),
-	{noreply, State#state{active = NextActive}}.
+	{noreply, State};
+handle_info({?MODULE, Event}, #state{active = false, msg_q = MsgQ} = State) ->
+	{noreply, State#state{msg_q = queue:in(Event, MsgQ)}};
+handle_info({?MODULE, Event}, #state{active = once, ctx = Ctx} = State) ->
+	horde_transport:notify(Ctx, self(), Event),
+	{noreply, State#state{active = false}}.
 
 % Private
 
