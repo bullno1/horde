@@ -208,8 +208,18 @@ init(#{
 			{stop, Reason}
 	end.
 
-handle_call(wait_join, From, State) ->
-	maybe_add_join_waiter(From, State);
+handle_call(
+	wait_join, From,
+	#state{status = Status, join_waiters = Waiters} = State
+) ->
+	case Status of
+		standalone ->
+			{reply, false, State};
+		ready ->
+			{reply, true, State};
+		_ ->
+			{noreply, State#state{join_waiters = [From | Waiters]}}
+	end;
 handle_call(
 	{lookup, Address}, From,
 	#state{
@@ -267,7 +277,7 @@ terminate(_Reason, #state{transport = Transport}) ->
 	ok.
 
 format_status(_Opt, [_PDict, State]) ->
-	[{data, [{"State", format_record(state, State)}]}].
+	[{data, [{"State", format_state(State)}]}].
 
 % Private
 
@@ -706,19 +716,6 @@ extract_info(What, State) ->
 readable_fields() ->
 	[status, transport, ring, successor, predecessor, address].
 
-maybe_add_join_waiter(
-	Waiter,
-	#state{status = Status, join_waiters = Waiters} = State
-) ->
-	case Status of
-		standalone ->
-			{reply, false, State};
-		ready ->
-			{reply, true, State};
-		_ ->
-			{noreply, State#state{join_waiters = [Waiter | Waiters]}}
-	end.
-
 -ifdef(TEST).
 start_timer(Timeout, Message) ->
 	horde_mock:start_timer(Timeout, self(), Message).
@@ -757,26 +754,23 @@ nodeset_add_node(
 			Tree
 	end.
 
-format_record(Type, Record) ->
+format_state(Record) ->
 	Indices = lists:zip(
-		rec_info(fields, Type),
-		lists:seq(2, rec_info(size, Type))
+		record_info(fields, state),
+		lists:seq(2, record_info(size, state))
 	),
 	maps:from_list([
-		{Key, format_field(Type, Key, element(Index, Record))}
+		{Key, format_field(Key, element(Index, Record))}
 		|| {Key, Index} <- Indices
 	]).
 
-format_field(state, ring, Ring) ->
+format_field(ring, Ring) ->
 	{horde_ring, horde_ring:size(Ring)};
-format_field(state, keypair, {PK, _SK}) ->
+format_field(keypair, {PK, _SK}) ->
 	{base64:encode(PK), <<>>};
-format_field(state, queries, Queries) ->
+format_field(queries, Queries) ->
 	{queries, maps:size(Queries)};
-format_field(_Type, _Key, Value) -> Value.
-
-rec_info(size, state) -> record_info(size, state);
-rec_info(fields, state) -> record_info(fields, state).
+format_field(_Key, Value) -> Value.
 
 undefined_if_removed(Address, #{address := Address}) -> undefined;
 undefined_if_removed(_, Node) -> Node.
