@@ -23,11 +23,9 @@ end_per_testcase(_Testcase, _Config) ->
 
 no_self_join(_Config) ->
 	meck:expect(horde_mock, start_timer,
-		fun(_Timeout, Dest, Message) ->
-			erlang:start_timer(0, Dest, Message)
-		end
+		fun(_Timeout, _Dest, _Message) -> make_ref() end
 	),
-	meck:expect(horde_mock, cancel_timer, fun erlang:cancel_timer/1),
+	meck:expect(horde_mock, cancel_timer, fun(_) -> ok end),
 
 	{ok, Node} = create_node(),
 	#{transport := TransportAddress} = horde:info(Node, address),
@@ -122,13 +120,7 @@ bootstrap(_Config) ->
 create_node() -> create_node(#{}).
 
 create_node(Opts) ->
-	CryptoMod = horde_ecdsa,
-	CryptoOpts = #{
-		hash_algo => sha256,
-		curve => secp384r1,
-		address_size => 160
-	},
-	Crypto = horde_crypto:init(CryptoMod, CryptoOpts),
+	Crypto = horde_crypto:default(),
 	DefaultOpts = #{
 		crypto => Crypto,
 		keypair => horde_crypto:generate_keypair(Crypto),
