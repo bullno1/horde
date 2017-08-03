@@ -61,7 +61,7 @@
 -type opts() :: #{
 	crypto := horde_crypto:ctx(),
 	keypair := horde_crypto:keypair(),
-	transport := {Module :: module(), Opts :: term()},
+	transport := horde_crypto:ctx(),
 	bootstrap_nodes => [horde_transport:address()],
 	ring_check_interval => non_neg_integer(),
 	query_timeout => pos_integer(),
@@ -72,6 +72,7 @@
 	num_neighbours => pos_integer(),
 	min_slice_size => pos_integer()
 }.
+-type join_status() :: standalone | joining | ready.
 
 -record(query, {
 	sender :: pid() | none,
@@ -120,7 +121,7 @@ lookup(Ref, Address, Timeout) ->
 	gen_server:call(Ref, {lookup, Address}, Timeout).
 
 -spec info
-	(ref(), status) -> standalone | joining | ready;
+	(ref(), status) -> join_status();
 	(ref(), ring) -> horde_ring:ring(overlay_address(), node_info());
 	(ref(), successor) -> node_info() | undefined;
 	(ref(), predecessor) -> node_info() | undefined;
@@ -153,11 +154,10 @@ stop(Ref) -> gen_server:stop(Ref).
 % gen_server
 
 init(#{
-	crypto := {CryptoMod, CryptoOpts},
+	crypto := Crypto,
 	keypair := {PubKey, _} = KeyPair,
 	transport := {TransportMod, TransportOpts}
 } = Opts) ->
-	Crypto = horde_crypto:init(CryptoMod, CryptoOpts),
 	case horde_transport:open(TransportMod, #{
 		crypto => Crypto,
 		keypair => KeyPair,
