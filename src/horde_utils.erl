@@ -13,7 +13,9 @@ is_address_between(Address, Lowerbound, Upperbound) ->
 	is_address_between(Address, Lowerbound, Upperbound, LessThan, LessThan).
 
 -spec is_address_between(T, T, T, order_fun(T), order_fun(T)) -> boolean().
-is_address_between(Address, Lowerbound, Upperbound, LowerboundCheck, UpperboundCheck) ->
+is_address_between(
+	Address, Lowerbound, Upperbound, LowerboundCheck, UpperboundCheck
+) ->
 	case Lowerbound < Upperbound of
 		true ->
 			LowerboundCheck(Lowerbound, Address)
