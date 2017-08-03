@@ -305,6 +305,22 @@ handle_overlay_message(
 	add_node(Node, State2).
 
 handle_overlay_message1(
+	Header, {lookup, OwnAddress},
+	#state{
+		address = OwnAddress,
+		transport = Transport,
+		successor = OwnSuccessor,
+		predecessor = OwnPredecessor
+	} = State
+) ->
+	TransportAddress = horde_transport:info(Transport, address),
+	NodeInfo = #{
+		address => #{overlay => OwnAddress, transport => TransportAddress},
+		last_seen => erlang:monotonic_time(seconds)
+	},
+	Nodes = nodeset([[NodeInfo], set_of(OwnSuccessor), set_of(OwnPredecessor)]),
+	reply(Header, {peer_info, Nodes}, State);
+handle_overlay_message1(
 	#{from := Sender} = Header, {lookup, TargetAddress},
 	#state{
 		ring = Ring,
