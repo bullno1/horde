@@ -116,7 +116,7 @@ start_link(Name, Opts) -> gen_server:start_link(Name, ?MODULE, Opts, []).
 
 -spec lookup(ref(), overlay_address(), timeout())
 	-> {ok, horde_transport:address()}
-	 | {error, term()}.
+	 | error.
 lookup(Ref, Address, Timeout) ->
 	gen_server:call(Ref, {lookup, Address}, Timeout).
 
