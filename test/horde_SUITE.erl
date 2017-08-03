@@ -30,8 +30,7 @@ no_self_join(_Config) ->
 	meck:expect(horde_mock, cancel_timer, fun erlang:cancel_timer/1),
 
 	{ok, Node} = create_node(),
-	Transport = horde:info(Node, transport),
-	TransportAddress = horde_transport:info(Transport, address),
+	#{transport := TransportAddress} = horde:info(Node, address),
 	false = horde:join(Node, [{transport, TransportAddress}], infinity),
 	horde:stop(Node).
 
@@ -57,8 +56,7 @@ bootstrap(_Config) ->
 	),
 
 	[BootstrapNode | _] = Nodes,
-	Transport = horde:info(BootstrapNode, transport),
-	BootstrapAddress = horde_transport:info(Transport, address),
+	#{transport := BootstrapAddress} = horde:info(BootstrapNode, address),
 	BootstrapNodes = [{transport, BootstrapAddress}],
 	lists:foreach(
 		fun(Node) -> horde:join_async(Node, BootstrapNodes) end,
@@ -72,7 +70,7 @@ bootstrap(_Config) ->
 	true = lists:all(
 		fun(Node) ->
 			Ring = horde:info(Node, ring),
-			OverlayAddress = horde:info(Node, address),
+			#{overlay := OverlayAddress} = horde:info(Node, address),
 			horde_ring:lookup(OverlayAddress, Ring) =:= none
 		end,
 		Nodes
@@ -86,25 +84,17 @@ bootstrap(_Config) ->
 	FullRing =
 		lists:foldl(
 			fun(Node, Acc) ->
-				horde_ring:insert(horde:info(Node, address), Node, Acc)
+				#{overlay := OverlayAddress} = horde:info(Node, address),
+				horde_ring:insert(OverlayAddress, Node, Acc)
 			end,
 			horde_ring:new(fun(Addr) -> MaxAddress - Addr end),
 			Nodes
 		),
-	%lists:foreach(
-		%fun(Node) ->
-			%#{address := #{overlay := SuccessorAddress}} = horde:info(Node, successor),
-			%#{address := #{overlay := PredecessorAddress}} = horde:info(Node, predecessor),
-			%OverlayAddress = horde:info(Node, address),
-			%ct:pal("~p: (~p, ~p)", [OverlayAddress, PredecessorAddress, SuccessorAddress])
-		%end,
-		%Nodes
-	%),
 	lists:foreach(
 		fun(Node) ->
-			#{address := #{overlay := SuccessorAddress}} = horde:info(Node, successor),
-			#{address := #{overlay := PredecessorAddress}} = horde:info(Node, predecessor),
-			OverlayAddress = horde:info(Node, address),
+			#{address := SuccessorAddress} = horde:info(Node, successor),
+			#{address := PredecessorAddress} = horde:info(Node, predecessor),
+			#{overlay := OverlayAddress} = horde:info(Node, address),
 			[SuccessorNode] = horde_ring:successors(OverlayAddress, 1, FullRing),
 			[PredecessorNode] = horde_ring:predecessors(OverlayAddress, 1, FullRing),
 			SuccessorAddress = horde:info(SuccessorNode, address),
@@ -117,9 +107,8 @@ bootstrap(_Config) ->
 		fun(Node) ->
 			lists:all(
 				fun(OtherNode) ->
-					OverlayAddress = horde:info(OtherNode, address),
-					NodeTransport = horde:info(OtherNode, transport),
-					TransportAddress = horde_transport:info(NodeTransport, address),
+					#{overlay := OverlayAddress, transport := TransportAddress}
+						= horde:info(OtherNode, address),
 					horde:lookup(Node, OverlayAddress, infinity) =:= {ok, TransportAddress}
 				end,
 				Nodes

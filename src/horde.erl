@@ -5,7 +5,6 @@
 	start_link/1,
 	start_link/2,
 	lookup/3,
-	info/1,
 	info/2,
 	join/3,
 	join_async/2,
@@ -121,23 +120,13 @@ lookup(Ref, Address, Timeout) ->
 	gen_server:call(Ref, {lookup, Address}, Timeout).
 
 -spec info
-	(ref(), status) -> boolean();
+	(ref(), status) -> standalone | joining | ready;
 	(ref(), ring) -> horde_ring:ring(overlay_address(), node_info());
 	(ref(), successor) -> node_info() | undefined;
 	(ref(), predecessor) -> node_info() | undefined;
-	(ref(), address) -> overlay_address();
+	(ref(), address) -> compound_address();
 	(ref(), transport) -> horde_transport:ref().
 info(Ref, Info) -> gen_server:call(Ref, {info, Info}).
-
--spec info(ref()) -> #{
-	status := standalone | joining | ready,
-	ring := horde_ring:ring(overlay_address(), node_info()),
-	transport := horde_transport:ref(),
-	successor := node_info() | undefined,
-	address := overlay_address(),
-	predecessor := node_info() | undefined
-}.
-info(Ref) -> gen_server:call(Ref, info).
 
 -spec join(ref(), [endpoint()], timeout()) -> boolean().
 join(Ref, BootstrapNodes, Timeout) ->
@@ -239,9 +228,7 @@ handle_call(
 	_ = start_lookup(Address, LookupPeers, From, State),
 	{noreply, State};
 handle_call({info, What}, _From, State) ->
-	{reply, extract_info(What, State), State};
-handle_call(info, _From, State) ->
-	{reply, extract_info(State), State}.
+	{reply, extract_info(What, State), State}.
 
 handle_cast({join, BootstrapNodes}, #state{status = standalone} = State) ->
 	case maybe_bootstrap(BootstrapNodes, State) of
@@ -691,17 +678,18 @@ maybe_remove_node(
 		predecessor, horde_ring:successors(OwnAddress, 1, Ring2), State3
 	).
 
-extract_info(State) ->
-	maps:from_list([
-		{What, extract_info(What, State)} || What <- readable_fields()
-	]).
-
 extract_info(status, #state{status = Status}) ->
 	case Status of
 		ready -> ready;
 		standalone -> standalone;
-		{joining, _} -> joining
+		{joining, _} -> joining;
+		joining2 -> joining
 	end;
+extract_info(
+	address, #state{address = OverlayAddress, transport = Transport}
+) ->
+	TransportAddress = horde_transport:info(Transport, address),
+	#{overlay => OverlayAddress, transport => TransportAddress};
 extract_info(What, State) ->
 	Indices = lists:zip(
 		record_info(fields, state),
