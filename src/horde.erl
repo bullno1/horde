@@ -308,6 +308,9 @@ maybe_bootstrap(BootstrapNodes, #state{address = OwnAddress} = State) ->
 			Err
 	end.
 
+start_lookup(_, [], ReplyTo, _State) ->
+	gen_server:reply(ReplyTo, error),
+	{error, no_peers};
 start_lookup(
 	Address, Peers, ReplyTo,
 	#state{
@@ -632,7 +635,7 @@ handle_info1(
 		ring_check_interval = RingCheckInterval
 	} = State
 ) ->
-	State2 = State,%check_ring(State),
+	State2 = check_ring(State),
 	State2#state{ring_check_timer = ?TIME:start_timer(RingCheckInterval, self(), check_ring)};
 handle_info1({timeout, _, {query_timeout, Id}} = Event, State) ->
 	dispatch_query_event(Event, fun handle_query_error/4, Id, State);
