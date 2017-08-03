@@ -66,7 +66,7 @@ handle_info(
 ) ->
 	case lookup_finished(OverlayAddress, Peers) of
 		{true, TransportAddress} ->
-			maybe_reply(Sender, {ok, TransportAddress}),
+			horde_utils:maybe_reply(Sender, {ok, TransportAddress}),
 			{stop, normal, State};
 		false ->
 			send_next_query(add_next_peers(Peers, State))
@@ -133,7 +133,7 @@ send_next_query(
 ) ->
 	case gb_trees:size(NextPeers) =:= 0 of
 		true ->
-			maybe_reply(Sender, error),
+			horde_utils:maybe_reply(Sender, error),
 			{stop, normal, State};
 		false ->
 			{_, NextPeer, NextPeers2} = gb_trees:take_smallest(NextPeers),
@@ -144,6 +144,3 @@ send_next_query(
 			},
 			{noreply, State2}
 	end.
-
-maybe_reply(none, _Msg) -> ok;
-maybe_reply(From, Msg) -> gen_server:reply(From, Msg).

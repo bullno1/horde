@@ -309,7 +309,7 @@ maybe_bootstrap(BootstrapNodes, #state{address = OwnAddress} = State) ->
 	end.
 
 start_lookup(_, [], ReplyTo, _State) ->
-	gen_server:reply(ReplyTo, error),
+	horde_utils:maybe_reply(ReplyTo, error),
 	{error, no_peers};
 start_lookup(
 	Address, Peers, ReplyTo,
@@ -393,7 +393,7 @@ handle_overlay_message1(
 		% a number of "next best hops" around the target.
 		none ->
 			{CloserNeighbour, NumSuccessors, NumPredecessors} =
-				case horde_address:is_between(
+				case horde_utils:is_address_between(
 					OwnAddress,
 					overlay_address(Sender),
 					TargetAddress
@@ -595,7 +595,7 @@ maybe_update_neighbour(
 	predecessor, Node,
 	#state{address = OwnAddress, predecessor = Predecessor} = State
 ) ->
-	case horde_address:is_between(
+	case horde_utils:is_address_between(
 		overlay_address(Node),
 		overlay_address(Predecessor),
 		OwnAddress
@@ -607,7 +607,7 @@ maybe_update_neighbour(
 	successor, Node,
 	#state{address = OwnAddress, successor = Successor} = State
 ) ->
-	case horde_address:is_between(
+	case horde_utils:is_address_between(
 		overlay_address(Node),
 		OwnAddress,
 		overlay_address(Successor)

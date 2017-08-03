@@ -45,21 +45,21 @@ crypto(_Config) ->
 	ok.
 
 address(_Config) ->
-	?assertEqual(true, horde_address:is_between(6, 5, 10)),
-	?assertEqual(false, horde_address:is_between(5, 5, 10)),
-	?assertEqual(false, horde_address:is_between(4, 5, 10)),
-	?assertEqual(false, horde_address:is_between(10, 5, 10)),
-	?assertEqual(false, horde_address:is_between(11, 5, 10)),
+	?assertEqual(true, horde_utils:is_address_between(6, 5, 10)),
+	?assertEqual(false, horde_utils:is_address_between(5, 5, 10)),
+	?assertEqual(false, horde_utils:is_address_between(4, 5, 10)),
+	?assertEqual(false, horde_utils:is_address_between(10, 5, 10)),
+	?assertEqual(false, horde_utils:is_address_between(11, 5, 10)),
 
-	?assertEqual(true, horde_address:is_between(11, 10, 5)),
-	?assertEqual(false, horde_address:is_between(10, 10, 5)),
-	?assertEqual(false, horde_address:is_between(9, 10, 5)),
-	?assertEqual(false, horde_address:is_between(6, 10, 5)),
+	?assertEqual(true, horde_utils:is_address_between(11, 10, 5)),
+	?assertEqual(false, horde_utils:is_address_between(10, 10, 5)),
+	?assertEqual(false, horde_utils:is_address_between(9, 10, 5)),
+	?assertEqual(false, horde_utils:is_address_between(6, 10, 5)),
 
 	LTE = fun erlang:'=<'/2,
-	?assertEqual(true, horde_address:is_between(5, 5, 10, LTE, LTE)),
+	?assertEqual(true, horde_utils:is_address_between(5, 5, 10, LTE, LTE)),
 
 	ok.
 
 horde_address_spec(_Config) ->
-	?assertEqual([], proper:check_specs(horde_address, [{to_file, user}])).
+	?assertEqual([], proper:check_specs(horde_utils, [{to_file, user}])).
