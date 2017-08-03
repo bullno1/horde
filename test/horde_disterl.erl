@@ -1,4 +1,5 @@
 -module(horde_disterl).
+-include_lib("stdlib/include/assert.hrl").
 -behaviour(horde_transport).
 -behaviour(gen_server).
 % horde_transport
@@ -82,10 +83,7 @@ handle_info({?MODULE, Event}, #state{active = once, ctx = Ctx} = State) ->
 % Private
 
 verify_msg({peer_info, Peers}) ->
-	true = lists:all(
-		fun(Peer) -> error =:= maps:find(source, Peer) end,
-		Peers
-	),
+	_ = [?assertEqual(error, maps:find(source, Peer)) || Peer <- Peers],
 	Addresses = [OverlayAddress || #{address := #{overlay := OverlayAddress}} <- Peers],
 	Length = length(Addresses),
 	Length2 = length(lists:usort(Addresses)),

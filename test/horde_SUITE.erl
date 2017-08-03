@@ -1,6 +1,7 @@
 -module(horde_SUITE).
 -compile(export_all).
 -include_lib("common_test/include/ct.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 all() -> [bootstrap, no_self_join].
 
@@ -29,7 +30,7 @@ no_self_join(_Config) ->
 
 	{ok, Node} = create_node(),
 	#{transport := TransportAddress} = horde:info(Node, address),
-	false = horde:join(Node, [{transport, TransportAddress}], infinity),
+	?assertEqual(false, horde:join(Node, [{transport, TransportAddress}], infinity)),
 	horde:stop(Node).
 
 bootstrap() -> [{timetrap, 5000}].
@@ -48,10 +49,9 @@ bootstrap(_Config) ->
 		end,
 		lists:seq(1, NumNodes)
 	),
-	true = lists:all(
-		fun(Node) -> standalone =:= horde:info(Node, status) end,
-		Nodes
-	),
+	_ = [
+		?assertEqual(standalone, horde:info(Node, status)) || Node <- Nodes
+	],
 
 	[BootstrapNode | _] = Nodes,
 	#{transport := BootstrapAddress} = horde:info(BootstrapNode, address),
@@ -60,23 +60,20 @@ bootstrap(_Config) ->
 		fun(Node) -> horde:join_async(Node, BootstrapNodes) end,
 		tl(Nodes)
 	),
-	true = lists:all(
-		fun(Node) -> horde:wait_join(Node, infinity) end,
-		tl(Nodes)
-	),
+	_ = [
+		?assertEqual(true, horde:wait_join(Node, infinity))
+		|| Node <- tl(Nodes)
+	],
 	% A node's ring must not contains itself
-	true = lists:all(
+	lists:foreach(
 		fun(Node) ->
 			Ring = horde:info(Node, ring),
 			#{overlay := OverlayAddress} = horde:info(Node, address),
-			horde_ring:lookup(OverlayAddress, Ring) =:= none
+			?assertEqual(none, horde_ring:lookup(OverlayAddress, Ring))
 		end,
 		Nodes
 	),
-	true = lists:all(
-		fun(Node) -> ready =:= horde:info(Node, status) end,
-		Nodes
-	),
+	_ = [?assertEqual(ready, horde:info(Node, status)) || Node <- Nodes],
 	% All nodes must have a correct local view of the swarm
 	MaxAddress = horde_crypto:info(horde_crypto:default(), max_address),
 	FullRing =
