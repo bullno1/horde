@@ -78,6 +78,13 @@
 	num_neighbours => pos_integer(),
 	min_slice_size => pos_integer()
 }.
+-type query_info() :: #{
+	sender := pid() | none,
+	destination := endpoint(),
+	message := message_body(),
+	num_retries := non_neg_integer(),
+	timer := reference() | undefined
+}.
 -type join_status() :: standalone | joining | ready.
 
 -record(query, {
@@ -129,19 +136,14 @@ lookup(Ref, Address, Timeout) ->
 -spec info
 	(ref(), status) -> join_status();
 	(ref(), ring) -> horde_ring:ring(overlay_address(), node_info());
+	(ref(), queries) -> #{reference() => query_info()};
 	(ref(), successor) -> node_info() | undefined;
 	(ref(), predecessor) -> node_info() | undefined;
 	(ref(), address) -> compound_address();
 	(ref(), transport) -> horde_transport:ref().
 info(Ref, Info) -> gen_server:call(Ref, {info, Info}).
 
--spec query_info(ref(), reference()) -> #{
-	sender := pid() | none,
-	destination := endpoint(),
-	message := message_body(),
-	num_retries := non_neg_integer(),
-	timer := reference() | undefined
-} | undefined.
+-spec query_info(ref(), reference()) -> query_info() | undefined.
 query_info(Ref, QueryRef) -> gen_server:call(Ref,  {query_info, QueryRef}).
 
 -spec join(ref(), [endpoint()], timeout()) -> boolean().
@@ -246,12 +248,7 @@ handle_call({query_info, QueryRef}, _From, #state{queries = Queries} = State) ->
 	Result =
 		case maps:find(QueryRef, Queries) of
 			{ok, Query} ->
-				maps:from_list(
-					lists:zip(
-						record_info(fields, query),
-						tl(tuple_to_list(Query))
-					)
-				);
+				format_query(Query);
 			error ->
 				undefined
 		end,
@@ -772,6 +769,8 @@ maybe_remove_node(
 		predecessor, horde_ring:successors(OwnAddress, 1, Ring2), State3
 	).
 
+extract_info( queries, #state{queries = Queries}) ->
+	maps:map(fun(_, V) -> format_query(V) end, Queries);
 extract_info(status, #state{status = Status}) ->
 	case Status of
 		ready -> ready;
@@ -796,7 +795,7 @@ extract_info(What, State) ->
 	element(proplists:get_value(What, AllowedIndices), State).
 
 readable_fields() ->
-	[status, transport, ring, successor, predecessor, address].
+	[status, transport, ring, successor, predecessor, address, queries].
 
 nodeset(Sets) ->
 	gb_trees:values(
@@ -838,6 +837,14 @@ format_field(keypair, {PK, _SK}) ->
 format_field(queries, Queries) ->
 	{queries, maps:size(Queries)};
 format_field(_Key, Value) -> Value.
+
+format_query(Query) ->
+	maps:from_list(
+		lists:zip(
+			record_info(fields, query),
+			tl(tuple_to_list(Query))
+		)
+	).
 
 undefined_if_removed(Address, #{address := Address}) -> undefined;
 undefined_if_removed(_, Node) -> Node.

@@ -87,7 +87,11 @@ with_policy(Policy, Fun) ->
 	end.
 
 -spec get_timers() -> [timer()].
-get_timers() -> gen_server:call(?MODULE, get_timers).
+get_timers() ->
+	lists:filter(
+		fun({_, Pid, _}) -> is_process_alive(Pid) end,
+		gen_server:call(?MODULE, get_timers)
+	).
 
 % gen_server
 

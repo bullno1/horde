@@ -3,7 +3,7 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
-all() -> [props, bootstrap, no_self_join].
+all() -> [bootstrap, no_self_join, props].
 
 init_per_suite(Config) ->
 	{ok, Apps} = application:ensure_all_started(horde),
@@ -29,7 +29,7 @@ no_self_join(_Config) ->
 	horde:stop(Node).
 
 props(_Config) ->
-	?assertEqual([], proper:module(horde_prop, [1000, {to_file, user}])).
+	?assertEqual([], proper:module(horde_prop, [5000, {to_file, user}])).
 
 bootstrap() -> [{timetrap, 5000}].
 

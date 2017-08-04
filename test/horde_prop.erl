@@ -1,19 +1,21 @@
 -module(horde_prop).
 -compile(export_all).
 -include_lib("proper/include/proper.hrl").
+-include_lib("stdlib/include/assert.hrl").
 -record(state, {
 	bootstrap_node,
-	nodes = []
+	nodes = [],
+	ring
 }).
 
 % Property
 
 prop_horde() ->
-	?TIMEOUT(60000,
+	?TIMEOUT(5000,
 		?FORALL(Commands, commands(?MODULE),
 			begin
 				{History, State, Result} = run_commands(?MODULE, Commands),
-				lists:foreach(fun horde:stop/1, State#state.nodes),
+				_ = [horde:stop(Node) || Node <- State#state.nodes],
 
 				?WHENFAIL(
 					begin
@@ -28,7 +30,10 @@ prop_horde() ->
 
 % Model
 
-initial_state() -> #state{}.
+initial_state() ->
+	Crypto = horde_crypto:default(),
+	MaxAddress = horde_crypto:info(Crypto, max_address),
+	#state{ring = horde_ring:new(fun(Addr) -> MaxAddress - Addr end)}.
 
 command(#state{bootstrap_node = undefined}) ->
 	{call, ?MODULE, new_node, []};
@@ -49,24 +54,32 @@ precondition(_, {call, ?MODULE, node_join, [Node, BootstrapNode]}) ->
 precondition(_, {call, _Mod, _Fun, _Args}) ->
 	true.
 
-postcondition(
+postcondition(State, Command, Result) ->
+	postcondition1(State, Command, Result),
+	true.
+
+postcondition1(
 	#state{nodes = Nodes},
 	{call, ?MODULE, new_node, []},
 	NewNode
 ) ->
 	with_fake_timers(fun() ->
 		#{overlay := NodeAddress} = horde:info(NewNode, address),
-		horde:info(NewNode, status) =:= standalone
-		andalso lists:all(
+		?assertEqual(standalone, horde:info(NewNode, status)),
+		lists:foreach(
 			fun(Node) ->
-				not (Node =/= NewNode andalso horde:info(Node, status) =:= ready)
-				orelse
-				error =:= horde:lookup(Node, NodeAddress, 300)
+				wait_until_stable(Node),
+				case Node =/= NewNode andalso horde:info(Node, status) =:= ready of
+					true ->
+						?assertEqual(error, horde:lookup(Node, NodeAddress, 300));
+					false ->
+						ok
+				end
 			end,
 			Nodes
 		)
 	end);
-postcondition(
+postcondition1(
 	#state{nodes = Nodes},
 	{call, ?MODULE, node_join, [JoinedNode, _]},
 	Joined
@@ -74,38 +87,53 @@ postcondition(
 	with_fake_timers(fun() ->
 		#{transport := TransportAddress, overlay := OverlayAddress} =
 			horde:info(JoinedNode, address),
-		Joined
-		andalso horde:info(JoinedNode, status) =:= ready
-		andalso lists:all(
+		?assert(Joined),
+		?assertEqual(ready, horde:info(JoinedNode, status)),
+		lists:foreach(
 			fun(Node) ->
-				not (horde:info(Node, status) =:= ready)
-				orelse
-				{ok, TransportAddress} =:= horde:lookup(Node, OverlayAddress, 300)
+				wait_until_stable(Node),
+				Queries = horde:info(Node, queries),
+				case horde:info(Node, status) =:= ready of
+					true ->
+						?assertEqual(
+							{Node, Queries, {ok, TransportAddress}},
+							{Node, Queries, horde:lookup(Node, OverlayAddress, 300)}
+						);
+					false ->
+						ok
+				end
 			end,
 			Nodes
 		)
 	end);
-postcondition(_State, {call, _Mod, _Fun, _Args}, _Res) ->
+postcondition1(_State, {call, _Mod, _Fun, _Args}, _Res) ->
 	true.
 
 next_state(
-	#state{nodes = Nodes} = State,
-	_,
+	#state{nodes = Nodes, ring = Ring} = State,
+	NodeAddress,
 	{call, ?MODULE, node_leave, [Node]}
 ) ->
-	State#state{nodes = lists:delete(Node, Nodes)};
+	State#state{
+		nodes = lists:delete(Node, Nodes),
+		ring = remove_from_ring(NodeAddress, Ring)
+	};
 next_state(
-	State,
+	#state{ring = Ring} = State,
 	_,
-	{call, ?MODULE, node_join, [_, _]}
+	{call, ?MODULE, node_join, [Node, _]}
 ) ->
-	State;
+	State#state{ring = add_to_ring(Node, Ring)};
 next_state(
-	#state{bootstrap_node = undefined} = State,
+	#state{bootstrap_node = undefined, ring = Ring} = State,
 	Node,
 	{call, ?MODULE, new_node, []}
 ) ->
-	State#state{bootstrap_node = Node, nodes = [Node]};
+	State#state{
+		bootstrap_node = Node,
+		nodes = [Node],
+		ring = add_to_ring(Node, Ring)
+	};
 next_state(
 	#state{nodes = Nodes} = State,
 	Node,
@@ -114,6 +142,59 @@ next_state(
 	State#state{nodes = [Node | Nodes]}.
 
 % Helpers
+
+new_node() ->
+	Crypto = horde_crypto:default(),
+	Opts = #{
+		crypto => Crypto,
+		keypair => horde_crypto:generate_keypair(Crypto),
+		transport => {horde_disterl, #{active => false}}
+	},
+	{ok, Node} = horde:start_link(Opts),
+	Node.
+
+node_join(Node, BootstrapNode) ->
+	with_fake_timers(fun() ->
+		#{transport := TransportAddress} = horde:info(BootstrapNode, address),
+		horde:join(Node, [{transport, TransportAddress}], 300)
+	end).
+
+wait_until_stable(Node) ->
+	wait_until(
+		fun() ->
+			NumQueries = maps:size(horde:info(Node, queries)),
+			NumQueries =:= 0
+		end
+	).
+
+wait_until(Fun) ->
+	case Fun() of
+		true -> ok;
+		false ->
+			fake_time:process_timers(
+				fun({_, _, {timeout, _, {query_timeout, _}}} = Timer) ->
+					timer:apply_after(0, ?MODULE, check_query_timeout, [Timer]),
+					delay;
+				   (_) ->
+					delay
+				end),
+			timer:sleep(10),
+			wait_until(Fun)
+	end.
+
+node_leave(Node) ->
+	NodeAddress = horde:info(Node, address),
+	horde:stop(Node),
+	NodeAddress.
+
+add_to_ring(Node, Ring) ->
+	CompoundAddress = {call, horde, info, [Node, address]},
+	OverlayAddress = {call, maps, get, [overlay, CompoundAddress]},
+	{call, horde_ring, enter, [OverlayAddress, Node, Ring]}.
+
+remove_from_ring(NodeAddress, Ring) ->
+	OverlayAddress = {call, maps, get, [overlay, NodeAddress]},
+	{call, horde_ring, remove, [OverlayAddress, Ring]}.
 
 with_fake_timers(Fun) ->
 	fake_time:process_timers({fun timer_policy/2, sets:new()}),
@@ -149,10 +230,13 @@ check_query_timeout({QueryTimer, Node, {timeout, _, {query_timeout, QueryRef}}})
 	end.
 
 format_state(State) ->
-	maps:from_list(
-		lists:zip(
-			record_info(fields, state),
-			tl(tuple_to_list(State))
+	maps:without(
+		[ring],
+		maps:from_list(
+			lists:zip(
+				record_info(fields, state),
+				tl(tuple_to_list(State))
+			)
 		)
 	).
 
@@ -180,22 +264,3 @@ format_command(Cmd, Result, _) ->
 
 replace_symbol({var, Var}, Vars) -> maps:get(Var, Vars);
 replace_symbol(X, _Vars) -> X.
-
-new_node() ->
-	Crypto = horde_crypto:default(),
-	Opts = #{
-		crypto => Crypto,
-		keypair => horde_crypto:generate_keypair(Crypto),
-		transport => {horde_disterl, #{active => false}}
-	},
-	{ok, Node} = horde:start_link(Opts),
-	Node.
-
-node_join(Node, BootstrapNode) ->
-	with_fake_timers(fun() ->
-		#{transport := TransportAddress} = horde:info(BootstrapNode, address),
-		horde:join(Node, [{transport, TransportAddress}], 300)
-	end).
-
-node_leave(Node) ->
-	horde:stop(Node).
