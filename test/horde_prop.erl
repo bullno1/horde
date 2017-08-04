@@ -95,32 +95,29 @@ postcondition(_State, {call, _Mod, _Fun, _Args}, _Res) ->
 	true.
 
 next_state(
-	#state{nodes = Nodes} = State,
-	_,
-	{call, ?MODULE, node_leave, [Node]}
-) ->
-	State#state{nodes = lists:delete(Node, Nodes)};
-next_state(
 	#state{} = State,
-	_,
-	{call, ?MODULE, node_join, [Node, _]}
+	_Node,
+	{call, ?MODULE, node_join, [_, _]}
 ) ->
-	State#state{};
+	State;
 next_state(
-	#state{bootstrap_node = undefined} = State,
+	#state{bootstrap_node = BootstrapNode, nodes = Nodes} = State,
 	Node,
 	{call, ?MODULE, new_node, []}
 ) ->
 	State#state{
-		bootstrap_node = Node,
-		nodes = [Node]
+		bootstrap_node = case BootstrapNode =:= undefined of
+			true -> Node;
+			false -> BootstrapNode
+		end,
+		nodes = ordsets:add_element(Node, Nodes)
 	};
 next_state(
 	#state{nodes = Nodes} = State,
-	Node,
-	{call, ?MODULE, new_node, []}
+	_,
+	{call, ?MODULE, node_leave, [Node]}
 ) ->
-	State#state{nodes = [Node | Nodes]}.
+	State#state{nodes = ordsets:del_element(Node, Nodes)}.
 
 % Helpers
 
@@ -141,24 +138,13 @@ node_join(Node, BootstrapNode) ->
 	end).
 
 wait_until_stable(Node) ->
-	wait_until(
-		fun() ->
-			NumQueries = maps:size(horde:info(Node, queries)),
-			NumQueries =:= 0
-		end
-	).
+	wait_until(fun() -> maps:size(horde:info(Node, queries)) =:= 0 end).
 
 wait_until(Fun) ->
 	case Fun() of
 		true -> ok;
 		false ->
-			fake_time:process_timers(
-				fun({_, _, {timeout, _, {query_timeout, _}}} = Timer) ->
-					timer:apply_after(0, ?MODULE, check_query_timeout, [Timer]),
-					delay;
-				   (_) ->
-					delay
-				end),
+			fake_time:process_timers(fun check_query_timeout/1),
 			timer:sleep(10),
 			wait_until(Fun)
 	end.
@@ -169,19 +155,28 @@ node_leave(Node) ->
 	NodeAddress.
 
 with_fake_timers(Fun) ->
-	fake_time:process_timers({fun timer_policy/2, sets:new()}),
-	fake_time:with_policy({fun timer_policy/2, sets:new()}, Fun).
+	Policy = fake_time:combine_policies([
+		{fun pass_one_check_ring/2, sets:new()},
+		fun check_query_timeout/1
+	]),
+	fake_time:process_timers(Policy),
+	fake_time:with_policy(Policy, Fun).
 
-timer_policy({_, Node, {timeout, _, check_ring}}, CheckedNodes) ->
+pass_one_check_ring({_, Node, {timeout, _, check_ring}}, CheckedNodes) ->
 	case sets:is_element(Node, CheckedNodes) of
 		true -> {delay, CheckedNodes};
 		false -> {trigger, sets:add_element(Node, CheckedNodes)}
 	end;
-timer_policy({_, _, {timeout, _, {query_timeout, _}}} = Timer, State) ->
-	timer:apply_after(0, ?MODULE, check_query_timeout, [Timer]),
+pass_one_check_ring(_, State) ->
 	{delay, State}.
 
-check_query_timeout({QueryTimer, Node, {timeout, _, {query_timeout, QueryRef}}}) ->
+check_query_timeout({_, _, {timeout, _, {query_timeout, _}}} = Timer) ->
+	timer:apply_after(0, ?MODULE, do_check_query_timeout, [Timer]),
+	delay;
+check_query_timeout(_) ->
+	delay.
+
+do_check_query_timeout({QueryTimer, Node, {timeout, _, {query_timeout, QueryRef}}}) ->
 	case horde:query_info(Node, QueryRef) of
 		#{destination := {compound, #{transport := {_, Pid}}}} ->
 			case is_process_alive(Pid) of
@@ -198,17 +193,14 @@ check_query_timeout({QueryTimer, Node, {timeout, _, {query_timeout, QueryRef}}})
 					fake_time:trigger_timer(QueryTimer)
 			end;
 		undefined ->
-			delay
+			ok
 	end.
 
 format_state(State) ->
-	maps:without(
-		[ring],
-		maps:from_list(
-			lists:zip(
-				record_info(fields, state),
-				tl(tuple_to_list(State))
-			)
+	maps:from_list(
+		lists:zip(
+			record_info(fields, state),
+			tl(tuple_to_list(State))
 		)
 	).
 

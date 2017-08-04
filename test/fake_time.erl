@@ -8,6 +8,8 @@
 	start_timer/3,
 	cancel_timer/1,
 	cancel_timer/2,
+	apply_policy/2,
+	combine_policies/1,
 	set_timer_policy/1,
 	with_policy/2,
 	get_timers/0,
@@ -93,6 +95,18 @@ get_timers() ->
 		gen_server:call(?MODULE, get_timers)
 	).
 
+-spec apply_policy(timer_policy(), timer()) -> {timer_policy_action(), timer_policy()}.
+apply_policy(Policy, _Timer) when is_atom(Policy) ->
+	{Policy, Policy};
+apply_policy(Policy, Timer) when is_function(Policy, 1) ->
+	{Policy(Timer), Policy};
+apply_policy({PolicyFun, PolicyState}, Timer) when is_function(PolicyFun, 2) ->
+	{PolicyAction, NewPolicyState} = PolicyFun(Timer, PolicyState),
+	{PolicyAction, {PolicyFun, NewPolicyState}}.
+
+-spec combine_policies([timer_policy()]) -> timer_policy().
+combine_policies(Policies) -> {fun apply_policies/2, Policies}.
+
 % gen_server
 
 init([]) ->
@@ -141,13 +155,20 @@ add_timer({_, Process, _} = Timer, #state{timers = Timers, policy = Policy} = St
 		trigger -> send_timer(Timer), State2
 	end.
 
-apply_policy(Policy, _Timer) when is_atom(Policy) ->
-	{Policy, Policy};
-apply_policy(Policy, Timer) when is_function(Policy, 1) ->
-	{Policy(Timer), Policy};
-apply_policy({PolicyFun, PolicyState}, Timer) when is_function(PolicyFun, 2) ->
-	{PolicyAction, NewPolicyState} = PolicyFun(Timer, PolicyState),
-	{PolicyAction, {PolicyFun, NewPolicyState}}.
+apply_policies(Timer, Policies) -> apply_policies(Timer, Policies, []).
+
+apply_policies(_Timer, [], Acc) ->
+	{delay, lists:reverse(Acc)};
+apply_policies(Timer, [Policy | Rest], Acc) ->
+	{PolicyAction, NewPolicy} = apply_policy(Policy, Timer),
+	case PolicyAction of
+		drop ->
+			{drop, lists:reverse([NewPolicy | Acc], Rest)};
+		delay ->
+			apply_policies(Timer, Rest, [NewPolicy | Acc]);
+		trigger ->
+			{trigger, lists:reverse([NewPolicy | Acc], Rest)}
+	end.
 
 process_timers(Policy, Timers) ->
 	process_timers(Policy, Timers, []).
