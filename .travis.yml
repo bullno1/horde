@@ -4,4 +4,3 @@ script:
   - make check
 otp_release:
   - 20.0
-dist: precise
