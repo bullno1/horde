@@ -6,7 +6,6 @@
 	predecessors/3,
 	lookup/2,
 	update/3,
-	enter/3,
 	insert/3,
 	remove/2,
 	to_list/1,
@@ -54,10 +53,6 @@ lookup(Key, #ring{forward = ForwardTree}) -> gb_trees:lookup(Key, ForwardTree).
 -spec update(Key, Value, ring(Key, Value)) -> ring(Key, Value).
 update(Key, Value, Ring) ->
 	modify_trees(Key, fun(K, Tree) -> gb_trees:update(K, Value, Tree) end, Ring).
-
--spec enter(Key, Value, ring(Key, Value)) -> ring(Key, Value).
-enter(Key, Value, Ring) ->
-	modify_trees(Key, fun(K, Tree) -> gb_trees:enter(K, Value, Tree) end, Ring).
 
 -spec insert(Key, Value, ring(Key, Value)) -> ring(Key, Value).
 insert(Key, Value, Ring) ->
