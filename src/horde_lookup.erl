@@ -93,7 +93,7 @@ add_next_peers(
 		next_peers = NextPeers
 	} = State
 ) ->
-	lists:foldl(
+	NextPeers2 = lists:foldl(
 		fun(#{address := Address}, Acc) ->
 			Peer = {compound, Address},
 			case sets:is_element(Peer, QueriedPeers) of
@@ -107,7 +107,7 @@ add_next_peers(
 		NextPeers,
 		Peers
 	),
-	State#state{next_peers = NextPeers}.
+	State#state{next_peers = NextPeers2}.
 
 lookup_finished(LookupAddress, Peers) ->
 	case lists:dropwhile(
