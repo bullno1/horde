@@ -35,11 +35,8 @@ command(#state{bootstrap_node = undefined}) ->
 command(#state{nodes = Nodes, bootstrap_node = BootstrapNode}) ->
 	oneof([
 		{call, ?MODULE, new_node, []},
-		?LET(Node, oneof(Nodes),
-			oneof([
-				{call, ?MODULE, node_join, [Node, BootstrapNode]},
-				{call, ?MODULE, node_leave, [Node]}
-			]))
+		?LET(Node, oneof(Nodes), {call, ?MODULE, node_join, [Node, BootstrapNode]}),
+		?LET(Node, oneof(Nodes), {call, ?MODULE, node_leave, [Node]})
 	]).
 
 precondition(

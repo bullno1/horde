@@ -636,8 +636,8 @@ handle_info1(
 	} = State
 ) ->
 	State2 = check_ring(State),
-	RingCheckTimer = ?TIME:start_timer(RingCheckInterval, self(), check_ring),
-	State2#state{ring_check_timer = RingCheckTimer};
+	NewRingCheckTimer = ?TIME:start_timer(RingCheckInterval, self(), check_ring),
+	State2#state{ring_check_timer = NewRingCheckTimer};
 handle_info1({timeout, _, {query_timeout, Id}} = Event, State) ->
 	dispatch_query_event(Event, fun handle_query_error/4, Id, State);
 handle_info1(
