@@ -59,9 +59,9 @@ postcondition(
 	with_fake_timers(fun() ->
 		#{overlay := NodeAddress} = horde:info(NewNode, address),
 		?assertEqual(standalone, horde:info(NewNode, status)),
+		lists:foreach(fun wait_until_stable/1, Nodes),
 		lists:all(
 			fun(Node) ->
-				wait_until_stable(Node),
 				?WHEN(Node =/= NewNode andalso horde:info(Node, status) =:= ready,
 					ok =:= ?assertEqual(error, horde:lookup(Node, NodeAddress, 300)))
 			end,
@@ -79,9 +79,9 @@ postcondition(
 			horde:info(JoinedNode, address),
 		?assert(Joined),
 		?assertEqual(ready, horde:info(JoinedNode, status)),
+		lists:foreach(fun wait_until_stable/1, Nodes),
 		lists:all(
 			fun(Node) ->
-				wait_until_stable(Node),
 				Queries = horde:info(Node, queries),
 				?WHEN(horde:info(Node, status) =:= ready,
 					ok =:= ?assertEqual(
@@ -123,15 +123,7 @@ next_state(
 
 % Helpers
 
-new_node() ->
-	Crypto = horde_crypto:default(),
-	Opts = #{
-		crypto => Crypto,
-		keypair => horde_crypto:generate_keypair(Crypto),
-		transport => {horde_disterl, #{active => false}}
-	},
-	{ok, Node} = horde:start_link(Opts),
-	Node.
+new_node() -> horde_test_utils:create_node().
 
 node_join(Node, BootstrapNode) ->
 	with_fake_timers(fun() ->
