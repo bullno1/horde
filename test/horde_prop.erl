@@ -67,7 +67,8 @@ postcondition(
 			end,
 			Nodes
 		)
-	end);
+	end),
+	fake_time:get_timers() =/= [];
 postcondition(
 	#state{nodes = Nodes},
 	{call, ?MODULE, node_join, [JoinedNode, _]},
@@ -90,9 +91,10 @@ postcondition(
 			end,
 			Nodes
 		)
-	end);
+	end),
+	fake_time:get_timers() =/= [];
 postcondition(_State, {call, _Mod, _Fun, _Args}, _Res) ->
-	true.
+	fake_time:get_timers() =/= [].
 
 next_state(
 	#state{} = State,

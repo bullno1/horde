@@ -16,14 +16,16 @@ end_per_suite(Config) ->
 
 init_per_testcase(_Testcase, Config) ->
 	fake_time:start_link(),
+	horde_fake_crypto_server:start_link([exs1024s, {123, 123534, 345345}]),
 	Config.
 
 end_per_testcase(_Testcase, _Config) ->
+	horde_fake_crypto_server:stop(),
 	fake_time:stop(),
 	ok.
 
 no_self_join(_Config) ->
-	{ok, Node} = create_node(),
+	Node = horde_test_utils:create_node(),
 	#{transport := TransportAddress} = horde:info(Node, address),
 	?assertEqual(false, horde:join(Node, [{transport, TransportAddress}], infinity)),
 	horde:stop(Node).
@@ -37,8 +39,7 @@ bootstrap(_Config) ->
 	NumNodes = 128,
 	Nodes = lists:map(
 		fun(_) ->
-			{ok, Pid} = create_node(),
-			Pid
+			horde_test_utils:create_node()
 		end,
 		lists:seq(1, NumNodes)
 	),
@@ -115,14 +116,3 @@ bootstrap(_Config) ->
 	),
 	_ = [horde:stop(Node) || Node <- Nodes],
 	ok.
-
-create_node() -> create_node(#{}).
-
-create_node(Opts) ->
-	Crypto = horde_crypto:default(),
-	DefaultOpts = #{
-		crypto => Crypto,
-		keypair => horde_crypto:generate_keypair(Crypto),
-		transport => {horde_disterl, #{active => false}}
-	},
-	horde:start_link(maps:merge(DefaultOpts, Opts)).
