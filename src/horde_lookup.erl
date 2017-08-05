@@ -11,23 +11,6 @@
 ]).
 % Internal
 -export([proc_entry/2]).
--ifdef(TEST).
--define(REPORT_HISTORY(State), report_history(State)).
--else.
--define(REPORT_HISTORY(State), ok).
--endif.
-
--type history()
-	:: {query, #{
-		reference := reference(),
-		endpoint := [horde:endpoint()],
-		distance := non_neg_integer()
-		}}
-	 | {reply, #{
-		reference := reference(),
-		result := [horde:node_info()]
-		}}
-	 | {noreply, reference()}.
 
 -record(state, {
 	horde :: pid(),
@@ -35,11 +18,11 @@
 	address :: horde:overlay_address(),
 	max_address :: horde:overlay_address(),
 	num_parallel_queries :: pos_integer(),
+	tracer :: horde_tracer:tracer(),
 	num_pending_queries = 0 :: non_neg_integer(),
 	next_resolvers = gb_trees:empty()
 		:: gb_trees:tree({non_neg_integer(), horde:endpoint()}, horde:endpoint()),
-	queried_resolvers = sets:new() :: sets:set(horde:endpoint()),
-	history = [] :: [history()]
+	queried_resolvers = sets:new() :: sets:set(horde:endpoint())
 }).
 
 % API
@@ -54,13 +37,15 @@ init(#{
 	address := Address,
 	max_address := MaxAddress,
 	num_parallel_queries := NumParallelQueries
-}) ->
+} = Opts) ->
+	Tracer = maps:get(tracer, Opts, horde_tracer:noop()),
 	State = #state{
 		horde = Horde,
 		sender = Sender,
 		address = Address,
 		max_address = MaxAddress,
-		num_parallel_queries = NumParallelQueries
+		num_parallel_queries = NumParallelQueries,
+		tracer = horde_tracer:handle_event({start, Opts}, Tracer)
 	},
 	{ok, State}.
 
@@ -71,13 +56,13 @@ handle_cast(_, State) -> {stop, unimplemented, State}.
 handle_info(
 	{horde, Ref, noreply},
 	#state{
-		history = History,
+		tracer = Tracer,
 		num_pending_queries = NumPendingQueries
 	} = State
 ) ->
 	send_next_query(State#state{
 		num_pending_queries = NumPendingQueries - 1,
-		history = [{noreply, Ref} | History]
+		tracer = horde_tracer:handle_event({noreply, Ref}, Tracer)
 	});
 handle_info(
 	{horde, Ref, {reply, {peer_info, Peers}}},
@@ -85,23 +70,22 @@ handle_info(
 		address = OverlayAddress,
 		sender = Sender,
 		num_pending_queries = NumPendingQueries,
-		history = History
+		tracer = Tracer
 	} = State
 ) ->
 	State2 = State#state{
 		num_pending_queries = NumPendingQueries - 1,
-		history = [{reply, #{reference => Ref, result => Peers}} | History]
+		tracer = horde_tracer:handle_event(
+			{reply, #{reference => Ref, result => Peers}},
+			Tracer
+		)
 	},
 	case lookup_finished(OverlayAddress, Peers) of
 		{true, TransportAddress} ->
-			%case
-				%length(State2#state.history) > State2#state.num_parallel_queries + 1
-			%of
-				%true -> ?REPORT_HISTORY(State2);
-				%false -> ok
-			%end,
-			horde_utils:maybe_reply(horde, Sender, {ok, TransportAddress}),
-			{stop, normal, State2};
+			Result = {ok, TransportAddress},
+			Tracer2 = horde_tracer:handle_event({finish, Result}, Tracer),
+			horde_utils:maybe_reply(horde, Sender, Result),
+			{stop, normal, State2#state{tracer = Tracer2}};
 		false ->
 			Endpoints = [{compound, Address} || #{address := Address} <- Peers],
 			send_next_query(add_resolvers(Endpoints, State2))
@@ -175,7 +159,7 @@ send_next_query(
 		num_pending_queries = NumPendingQueries,
 		next_resolvers = NextResolvers,
 		queried_resolvers = QueriedResolvers,
-		history = History,
+		tracer = Tracer,
 		horde = Horde
 	} = State
 ) ->
@@ -183,14 +167,9 @@ send_next_query(
 	if
 		NumNextResolvers =:= 0, NumPendingQueries =:= 0 ->
 			% Nothing more we could do
-			%case length(History) > 2 of
-				%true ->
-					%?REPORT_HISTORY(State);
-				%false ->
-					%ok
-			%end,
+			Tracer2 = horde_tracer:handle_event({finish, error}, Tracer),
 			horde_utils:maybe_reply(horde, Sender, error),
-			{stop, normal, State};
+			{stop, normal, State#state{tracer = Tracer2}};
 		NumNextResolvers =:= 0, NumPendingQueries > 0 ->
 			% Wait for pending queries to finish
 			{noreply, State};
@@ -204,56 +183,16 @@ send_next_query(
 			Ref = horde:send_query_async(Horde, NextResolver, {lookup, Address}),
 			State2 = State#state{
 				next_resolvers = NextResolvers2,
-				history = [
+				tracer = horde_tracer:handle_event(
 					{query, #{
 						reference => Ref,
 						endpoint => NextResolver,
 						distance => Distance
-					}} | History
-				],
+					}}, Tracer
+				),
 				num_pending_queries = NumPendingQueries + 1,
 				queried_resolvers = sets:add_element(NextResolver, QueriedResolvers)
 			},
 			% Send more if we have not reached the limit
 			send_next_query(State2)
 	end.
-
--ifdef(TEST).
-report_history(#state{address = Address, history = History}) ->
-	ForwardHistory = lists:reverse(History),
-	ct:pal("Target: ~p~nDistances: ~w~nHistory: ~n~s", [
-		Address,
-		[Distance || {query, #{distance := Distance}} <- ForwardHistory],
-		format_history(ForwardHistory)
-	]).
-
-format_history(History) -> format_history(History, #{}, []).
-
-format_history([], Mappings, Acc) ->
-	lists:reverse(Acc);
-format_history([Event | Rest], Mappings, Acc) ->
-	{NewLine, NewMappings} = case Event of
-		{query, #{reference := Ref, endpoint := Endpoint, distance := Distance}} ->
-			QueryNo = maps:size(Mappings) + 1,
-			Line = io_lib:format(
-				"send #~p (distance: ~p) -> ~p~n",
-				[QueryNo, Distance, Endpoint]
-			),
-			{Line, Mappings#{Ref => QueryNo}};
-		{reply, #{reference := Ref, result := Peers}} ->
-			QueryNo = maps:get(Ref, Mappings),
-			Line = io_lib:format(
-				"recv #~p: ~p~n",
-				[QueryNo, [Address || #{address := Address} <- Peers]]
-			),
-			{Line, Mappings};
-		{noreply, Ref} ->
-			QueryNo = maps:get(Ref, Mappings),
-			Line = io_lib:format(
-				"fail #~p",
-				[QueryNo]
-			),
-			{Line, Mappings}
-	end,
-	format_history(Rest, NewMappings, [NewLine | Acc]).
--endif.

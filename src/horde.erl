@@ -4,6 +4,7 @@
 -export([
 	start_link/1,
 	start_link/2,
+	lookup/2,
 	lookup/3,
 	info/2,
 	join/3,
@@ -24,8 +25,7 @@
 	handle_call/3,
 	handle_cast/2,
 	handle_info/2,
-	terminate/2,
-	format_status/2
+	terminate/2
 ]).
 -export_type([
 	name/0,
@@ -37,7 +37,6 @@
 	message_header/0,
 	message_body/0
 ]).
--compile({inline, [readable_fields/0]}).
 -ifdef(TEST).
 -define(TIME, fake_time).
 -else.
@@ -129,11 +128,14 @@ start_link(Opts) -> gen_server:start_link(?MODULE, Opts, []).
 -spec start_link(name(), opts()) -> {ok, pid()} | {error, any()}.
 start_link(Name, Opts) -> gen_server:start_link(Name, ?MODULE, Opts, []).
 
--spec lookup(ref(), overlay_address(), timeout())
-	-> {ok, horde_transport:address()}
-	 | error.
-lookup(Ref, Address, Timeout) ->
-	gen_server:call(Ref, {lookup, Address}, Timeout).
+-spec lookup(ref(), overlay_address())
+	-> {ok, horde_transport:address()} | error.
+lookup(Ref, Address) -> lookup(Ref, Address, horde_tracer:noop()).
+
+-spec lookup(ref(), overlay_address(), horde_tracer:tracer())
+	-> {ok, horde_transport:address()} | error.
+lookup(Ref, Address, Tracer) ->
+	gen_server:call(Ref, {lookup, Address, Tracer}, infinity).
 
 -spec info
 	(ref(), status) -> join_status();
@@ -231,7 +233,7 @@ handle_call(
 			{noreply, State#state{join_waiters = [From | Waiters]}}
 	end;
 handle_call(
-	{lookup, Address}, From,
+	{lookup, Address, Tracer}, From,
 	#state{
 		address = OwnAddress,
 		ring = Ring,
@@ -246,7 +248,7 @@ handle_call(
 		horde_ring:predecessors(OwnAddress, NumNeighbours, Ring)
 	]),
 	EndpointsOfPeers = [{compound, Addr} || #{address := Addr} <- Peers],
-	_ = start_lookup(Address, EndpointsOfPeers, {sync, From}, State),
+	_ = start_lookup(Address, EndpointsOfPeers, Tracer, {sync, From}, State),
 	{noreply, State};
 handle_call({send_query, Endpoint, Message}, {_Pid, QueryRef} = From, State) ->
 	State2 = start_query(QueryRef, {sync, From}, Endpoint, Message, State),
@@ -255,7 +257,7 @@ handle_call({query_info, QueryRef}, _From, #state{queries = Queries} = State) ->
 	Result =
 		case maps:find(QueryRef, Queries) of
 			{ok, Query} ->
-				format_query(Query);
+				record_to_map(record_info(fields, query), Query);
 			error ->
 				undefined
 		end,
@@ -267,7 +269,8 @@ handle_cast(
 	{join, BootstrapNodes},
 	#state{address = OwnAddress, status = standalone} = State
 ) ->
-	case start_lookup(OwnAddress, BootstrapNodes, none, State) of
+	Tracer = horde_tracer:noop(),
+	case start_lookup(OwnAddress, BootstrapNodes, Tracer, none, State) of
 		{ok, Pid} ->
 			MonitorRef = erlang:monitor(process, Pid),
 			{noreply, State#state{status = {joining, MonitorRef}}};
@@ -292,16 +295,13 @@ terminate(_Reason, #state{transport = Transport}) ->
 	_ = horde_transport:close(Transport),
 	ok.
 
-format_status(_Opt, [_PDict, State]) ->
-	[{data, [{"State", format_state(State)}]}].
-
 % Private
 
-start_lookup(_, [], ReplyTo, _State) ->
+start_lookup(_, [], _Tracer, ReplyTo, _State) ->
 	horde_utils:maybe_reply(?MODULE, ReplyTo, error),
 	{error, no_resolver};
 start_lookup(
-	Address, Resolvers, ReplyTo,
+	Address, Resolvers, Tracer, ReplyTo,
 	#state{
 		num_parallel_queries = NumParallelQueries,
 		max_address = MaxAddress
@@ -313,7 +313,8 @@ start_lookup(
 		address => Address,
 		resolvers => Resolvers,
 		max_address => MaxAddress,
-		num_parallel_queries => NumParallelQueries
+		num_parallel_queries => NumParallelQueries,
+		tracer => Tracer
 	},
 	horde_lookup:start_link(LookupArgs).
 
@@ -769,8 +770,13 @@ maybe_remove_node(
 		predecessor, horde_ring:successors(OwnAddress, 1, Ring2), State3
 	).
 
-extract_info( queries, #state{queries = Queries}) ->
-	maps:map(fun(_, V) -> format_query(V) end, Queries);
+extract_info(queries, #state{queries = Queries}) ->
+	maps:map(
+		fun(_, V) ->
+			record_to_map(record_info(fields, query), V)
+		end,
+		Queries
+	);
 extract_info(status, #state{status = Status}) ->
 	case Status of
 		ready -> ready;
@@ -784,18 +790,7 @@ extract_info(
 	TransportAddress = horde_transport:info(Transport, address),
 	#{overlay => OverlayAddress, transport => TransportAddress};
 extract_info(What, State) ->
-	Indices = lists:zip(
-		record_info(fields, state),
-		lists:seq(2, record_info(size, state))
-	),
-	AllowedIndices = lists:filter(
-		fun({Key, _Index}) -> lists:member(Key, readable_fields()) end,
-		Indices
-	),
-	element(proplists:get_value(What, AllowedIndices), State).
-
-readable_fields() ->
-	[status, transport, ring, successor, predecessor, address, queries].
+	maps:get(What, record_to_map(record_info(fields, state), State)).
 
 nodeset(Sets) ->
 	maps:values(
@@ -820,31 +815,8 @@ nodeset_add_node(
 			Nodes
 	end.
 
-format_state(Record) ->
-	Indices = lists:zip(
-		record_info(fields, state),
-		lists:seq(2, record_info(size, state))
-	),
-	maps:from_list([
-		{Key, format_field(Key, element(Index, Record))}
-		|| {Key, Index} <- Indices
-	]).
-
-format_field(ring, Ring) ->
-	{horde_ring, horde_ring:size(Ring)};
-format_field(keypair, {PK, _SK}) ->
-	{base64:encode(PK), <<>>};
-format_field(queries, Queries) ->
-	{queries, maps:size(Queries)};
-format_field(_Key, Value) -> Value.
-
-format_query(Query) ->
-	maps:from_list(
-		lists:zip(
-			record_info(fields, query),
-			tl(tuple_to_list(Query))
-		)
-	).
+record_to_map(Fields, Record) ->
+	maps:from_list(lists:zip(Fields, tl(tuple_to_list(Record)))).
 
 undefined_if_removed(Address, #{address := Address}) -> undefined;
 undefined_if_removed(_, Node) -> Node.

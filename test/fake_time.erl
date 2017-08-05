@@ -48,13 +48,18 @@ start_link() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 stop() -> gen_server:stop(?MODULE).
 
 send_after(_Timeout, Target, Message) ->
-	gen_server:call(?MODULE, {send_after, Target, Message}).
+	TimerRef = make_ref(),
+	Timer = {TimerRef, Target, Message},
+	gen_server:cast(?MODULE, {start_timer, Timer}),
+	TimerRef.
 
 start_timer(_Timeout, Target, Message) ->
-	gen_server:call(?MODULE, {start_timer, Target, Message}).
+	TimerRef = make_ref(),
+	Timer = {TimerRef, Target, {timeout, TimerRef, Message}},
+	gen_server:cast(?MODULE, {start_timer, Timer}),
+	TimerRef.
 
-cancel_timer(Ref) ->
-	gen_server:call(?MODULE, {cancel_timer, Ref}).
+cancel_timer(Ref) -> gen_server:cast(?MODULE, {cancel_timer, Ref}).
 
 cancel_timer(Ref, _) -> cancel_timer(Ref).
 
@@ -106,23 +111,19 @@ init([]) ->
 	{ok, #state{}}.
 
 handle_call({process_timers, Policy}, _, #state{timers = Timers} = State) ->
-	{reply, ok, State#state{timers = process_timers(Policy, Timers)}};
-handle_call({start_timer, Target, Message}, _, State) ->
-	Ref = make_ref(),
-	Timer = {Ref, Target, {timeout, Ref, Message}},
-	{reply, Ref, add_timer(Timer, State)};
-handle_call({send_after, Target, Message}, _, State) ->
-	Ref = make_ref(),
-	Timer = {Ref, Target, Message},
-	{reply, Ref, add_timer(Timer, State)};
+	{NewTimers, _NewPolicy} = process_timers(Policy, Timers),
+	{reply, ok, State#state{timers = NewTimers}};
 handle_call(
-	{set_timer_policy, NewPolicy}, _, #state{policy = OldPolicy} = State
+	{set_timer_policy, NewPolicy}, _,
+	#state{policy = OldPolicy, timers = Timers} = State
 ) ->
-	{reply, OldPolicy, State#state{policy = NewPolicy}};
-handle_call({cancel_timer, Ref}, _, #state{timers = Timers} = State) ->
-	{reply, ok, State#state{timers = maps:remove(Ref, Timers)}}.
+	{NewTimers, NewPolicy2} = process_timers(NewPolicy, Timers),
+	{reply, OldPolicy, State#state{policy = NewPolicy2, timers = NewTimers}}.
 
-handle_cast(_, State) -> {noreply, State}.
+handle_cast({start_timer, Timer}, State) ->
+	{noreply, add_timer(Timer, State)};
+handle_cast({cancel_timer, Ref}, #state{timers = Timers} = State) ->
+	{noreply, State#state{timers = maps:remove(Ref, Timers)}}.
 
 handle_info({'EXIT', Process, _}, #state{timers = Timers} = State) ->
 	Timers2 = maps:filter(
@@ -164,7 +165,7 @@ apply_policies(Timer, [Policy | Rest], Acc) ->
 	end.
 
 process_timers(Policy, Timers) ->
-	{NewTimers, _} = maps:fold(
+	maps:fold(
 		fun(Ref, Timer, {NewTimers, CurrentPolicy}) ->
 			case apply_policy(CurrentPolicy, Timer) of
 				{drop, NewPolicy} ->
@@ -178,7 +179,6 @@ process_timers(Policy, Timers) ->
 		end,
 		{maps:new(), Policy},
 		Timers
-	),
-	NewTimers.
+	).
 
 send_timer({_, Target, Message}) -> Target ! Message.

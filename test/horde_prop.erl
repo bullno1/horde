@@ -16,16 +16,45 @@ prop_horde() ->
 		{commands(?MODULE),
 		 non_neg_integer(), non_neg_integer(), non_neg_integer()},
 		begin
-			horde_addr_gen:reset_seed([exs1024s, {S1, S2, S3}]),
-			{History, State, Result} = run_commands(?MODULE, Commands),
-			_ = [catch horde:stop(Node) || Node <- State#state.nodes],
+			Parent = self(),
+			Pid = spawn(fun() ->
+				horde_addr_gen:reset([exs1024s, {S1, S2, S3}]),
+				{History, State, Result} = run_commands(?MODULE, Commands),
+				_ = [catch horde:stop(Node) || Node <- State#state.nodes],
+				Parent ! {self(), History, State, Result}
+			end),
 
-			?WHENFAIL(
-				io:format(user, "Commands:~n~s~nHistory: ~p~nState: ~p~nResult: ~p~n", [
-					pretty_print(Commands), History, State, Result
+			MonitorRef = monitor(process, Pid),
+			Stacktrace =
+				receive
+					{'DOWN', MonitorRef, process, Pid, _} ->
+						[]
+				after 5000 ->
+					CurrentStacktrace =
+						try erlang:process_info(Pid, current_stacktrace) of
+							{current_stacktrace, ST} -> ST;
+							_ -> []
+						catch
+							error:badarg -> []
+						end,
+					exit(Pid, kill),
+					CurrentStacktrace
+				end,
+
+			receive
+				{Pid, History, State, Result} ->
+					?WHENFAIL(
+						io:format(user, "~nCommands:~n~s~nHistory: ~p~nState: ~p~nResult: ~p~n", [
+							pretty_print(Commands), History, State, Result
+						]),
+						aggregate(command_names(Commands), Result =:= ok)
+					)
+			after 0 ->
+				io:format(user, "~nCommands:~n~s~nReason: ~p~nStacktrace: ~p~n", [
+					pretty_print(Commands), timeout, Stacktrace
 				]),
-				aggregate(command_names(Commands), Result =:= ok)
-			)
+				false
+			end
 		end).
 
 % Model
@@ -59,10 +88,14 @@ postcondition(
 	with_fake_timers(fun() ->
 		#{overlay := NodeAddress} = horde:info(NewNode, address),
 		?assertEqual(standalone, horde:info(NewNode, status)),
+		Tracer = horde_lookup_tracer:new(#{
+			report_on_success => true,
+			report_on_failure => false
+		}),
 		lists:all(
 			fun(Node) ->
 				?WHEN(Node =/= NewNode andalso horde:info(Node, status) =:= ready,
-					ok =:= ?assertEqual(error, horde:lookup(Node, NodeAddress, 5000)))
+					ok =:= ?assertEqual(error, horde:lookup(Node, NodeAddress, Tracer)))
 			end,
 			Nodes
 		)
@@ -77,13 +110,17 @@ postcondition(
 			CompoundAddress = horde:info(JoinedNode, address),
 		?assert(Joined),
 		?assertEqual(ready, horde:info(JoinedNode, status)),
+		Tracer = horde_lookup_tracer:new(#{
+			report_on_success => false,
+			report_on_failure => true
+		}),
 		lists:all(
 			fun(Node) ->
 				Queries = horde:info(Node, queries),
 				?WHEN(horde:info(Node, status) =:= ready,
 					ok =:= ?assertEqual(
 						{Node, Queries, {ok, TransportAddress}},
-						{Node, Queries, horde:lookup(Node, OverlayAddress, 5000)}
+						{Node, Queries, horde:lookup(Node, OverlayAddress, Tracer)}
 					))
 					andalso
 					ok =:= ?assertEqual(
@@ -149,8 +186,7 @@ with_fake_timers(Fun) ->
 		{fun pass_one_check_ring/2, sets:new()},
 		fun check_query_timeout/1
 	]),
-	fake_time:process_timers(Policy),
-	fake_time:with_policy(fun check_query_timeout/1, Fun).
+	fake_time:with_policy(Policy, Fun).
 
 pass_one_check_ring({_, Node, {timeout, _, check_ring}}, CheckedNodes) ->
 	case sets:is_element(Node, CheckedNodes) of
@@ -160,31 +196,36 @@ pass_one_check_ring({_, Node, {timeout, _, check_ring}}, CheckedNodes) ->
 pass_one_check_ring(_, State) ->
 	{delay, State}.
 
-check_query_timeout({_, _, {timeout, _, {query_timeout, _}}} = Timer) ->
-	timer:apply_after(0, ?MODULE, do_check_query_timeout, [Timer]),
-	delay;
+check_query_timeout({TimerRef, Node, {timeout, _, {query_timeout, QueryRef}}}) ->
+	QueriedProcess =
+		case horde:query_info(Node, QueryRef) of
+			#{destination := {compound, #{transport := {_, Pid}}}} ->
+				Pid;
+			#{destination := {transport, {_, Pid}}} ->
+				Pid;
+			undefined ->
+				undefined
+		end,
+	case is_pid(QueriedProcess) andalso is_process_alive(QueriedProcess) of
+		true ->
+			on_down(QueriedProcess,
+				fun() ->
+					fake_time:trigger_timer(TimerRef)
+				end),
+			delay;
+		false ->
+			trigger
+	end;
 check_query_timeout(_) ->
 	delay.
 
-do_check_query_timeout({QueryTimer, Node, {timeout, _, {query_timeout, QueryRef}}}) ->
-	case horde:query_info(Node, QueryRef) of
-		#{destination := {compound, #{transport := {_, Pid}}}} ->
-			case is_process_alive(Pid) of
-				true ->
-					ok;
-				false ->
-					fake_time:trigger_timer(QueryTimer)
-			end;
-		#{destination := {transport, {_, Pid}}} ->
-			case is_process_alive(Pid) of
-				true ->
-					ok;
-				false ->
-					fake_time:trigger_timer(QueryTimer)
-			end;
-		undefined ->
-			ok
-	end.
+on_down(Pid, Fun) ->
+	spawn(fun() ->
+		MonitorRef = monitor(process, Pid),
+		receive
+			{'DOWN', MonitorRef, process, Pid, _} -> Fun()
+		end
+	end).
 
 format_state(State) ->
 	maps:from_list(

@@ -9,7 +9,7 @@ all() ->
 	 props].
 
 groups() ->
-	[{unstable, [{repeat_until_any_fail, 10}], [bootstrap]}].
+	[{unstable, [{repeat_until_any_fail, 5}], [bootstrap]}].
 
 init_per_suite(Config) ->
 	{ok, Apps} = application:ensure_all_started(horde),
@@ -37,9 +37,9 @@ no_self_join(_Config) ->
 	horde:stop(Node).
 
 props(_Config) ->
-	?assertEqual([], proper:module(horde_prop, [10000, {to_file, user}])).
+	?assertEqual([], proper:module(horde_prop, [20000, {to_file, user}])).
 
-bootstrap() -> [{timetrap, 10000}].
+bootstrap() -> [{timetrap, 15000}].
 
 bootstrap(_Config) ->
 	NumNodes = 128,
@@ -107,6 +107,10 @@ bootstrap(_Config) ->
 		Nodes
 	),
 	% Any node can lookup other nodes
+	Tracer = horde_tracer:new(horde_lookup_tracer, #{
+		report_on_success => false,
+		report_on_failure => true
+	}),
 	lists:foreach(
 		fun(Node) ->
 			lists:foreach(
@@ -115,7 +119,7 @@ bootstrap(_Config) ->
 						= horde:info(OtherNode, address),
 					ok =:= ?assertEqual(
 						{ok, TransportAddress},
-						horde:lookup(Node, OverlayAddress, infinity)
+						horde:lookup(Node, OverlayAddress, Tracer)
 					)
 				end,
 				Nodes

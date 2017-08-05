@@ -3,7 +3,7 @@
 % API
 -export([
 	start_link/1,
-	reset_seed/1,
+	reset/1,
 	next_address/0,
 	max_address/0,
 	stop/0
@@ -23,7 +23,7 @@
 
 start_link(Opts) -> gen_server:start_link({local, ?MODULE}, ?MODULE, Opts, []).
 
-reset_seed(Opts) -> gen_server:call(?MODULE, {reset_seed, Opts}).
+reset(Opts) -> gen_server:call(?MODULE, {reset, Opts}).
 
 max_address() -> 65535.
 
@@ -35,8 +35,8 @@ stop() -> gen_server:stop(?MODULE).
 
 init(Seed) -> {ok, #state{rand = apply(rand, seed_s, Seed)}}.
 
-handle_call({reset_seed, Seed}, _, State) ->
-	{reply, ok, State#state{rand = apply(rand, seed_s, Seed)}};
+handle_call({reset, Seed}, _, _State) ->
+	{reply, ok, #state{rand = apply(rand, seed_s, Seed)}};
 handle_call(next_address, _, State) ->
 	{Address, State2} = next_address(State),
 	{reply, Address, State2}.
