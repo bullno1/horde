@@ -11,7 +11,7 @@
 % Property
 
 prop_horde() ->
-	?TIMEOUT(10000,
+	?TIMEOUT(30000,
 		?FORALL(
 			{Commands, S1, S2, S3},
 			{commands(?MODULE),
