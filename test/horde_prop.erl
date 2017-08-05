@@ -21,7 +21,6 @@ prop_horde() ->
 					begin
 						format_history(History, Commands),
 						io:format(user, "Last state: ~p~n", [format_state(State)]),
-						io:format(user, "Timers: ~p~n", [fake_time:get_timers()]),
 						io:format(user, "Result: ~p~n", [Result])
 					end,
 					aggregate(command_names(Commands), Result =:= ok)
@@ -201,6 +200,8 @@ format_state(State) ->
 format_history(History, Cmd) -> format_history(History, Cmd, #{}).
 
 format_history([], [], _) ->
+	ok;
+format_history(_, [], _) ->
 	ok;
 format_history([], [Cmd | _], Vars) ->
 	format_command(Cmd, crash, Vars);

@@ -107,7 +107,10 @@ bootstrap(_Config) ->
 				fun(OtherNode) ->
 					#{overlay := OverlayAddress, transport := TransportAddress}
 						= horde:info(OtherNode, address),
-					horde:lookup(Node, OverlayAddress, infinity) =:= {ok, TransportAddress}
+					ok =:= ?assertEqual(
+						{ok, TransportAddress},
+						horde:lookup(Node, OverlayAddress, infinity)
+					)
 				end,
 				Nodes
 			)
