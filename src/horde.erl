@@ -355,6 +355,7 @@ handle_overlay_message1(
 		predecessor = OwnPredecessor
 	} = State
 ) ->
+	% If own address is being queried, reply with info and immediate neighbours
 	TransportAddress = horde_transport:info(Transport, address),
 	NodeInfo = #{
 		address => #{overlay => OwnAddress, transport => TransportAddress},
@@ -379,19 +380,19 @@ handle_overlay_message1(
 		% If node is not known, reply with a closer immediate neighbour and
 		% a number of "next best hops" around the target.
 		none ->
-			{CloserNeighbour, NumSuccessors, NumPredecessors} =
+			CloserNeighbour =
 				case horde_utils:is_address_between(
 					OwnAddress,
 					overlay_address(Sender),
 					TargetAddress
 				) of
-					true -> {OwnSuccessor, 1, NumNextHops - 1};
-					false -> {OwnPredecessor, NumNextHops - 1, 1}
+					true -> OwnSuccessor;
+					false -> OwnPredecessor
 				end,
 			nodeset([
 				set_of(CloserNeighbour),
-				horde_ring:successors(TargetAddress, NumSuccessors, Ring),
-				horde_ring:predecessors(TargetAddress, NumPredecessors, Ring)
+				horde_ring:successors(TargetAddress, 1, Ring),
+				horde_ring:predecessors(TargetAddress, NumNextHops - 1, Ring)
 			])
 	end,
 	reply(Header, {peer_info, Nodes}, State);
