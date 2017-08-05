@@ -142,7 +142,7 @@ with_fake_timers(Fun) ->
 		fun check_query_timeout/1
 	]),
 	fake_time:process_timers(Policy),
-	fake_time:with_policy(Policy, Fun).
+	fake_time:with_policy(fun check_query_timeout/1, Fun).
 
 pass_one_check_ring({_, Node, {timeout, _, check_ring}}, CheckedNodes) ->
 	case sets:is_element(Node, CheckedNodes) of
