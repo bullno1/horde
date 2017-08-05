@@ -24,10 +24,10 @@ stop() -> gen_server:stop(?MODULE).
 init(Opts) -> {ok, apply(rand, seed_s, Opts)}.
 
 handle_call(max_address, _, State) ->
-	{reply, 4294967295, State};
+	{reply, 65535, State};
 handle_call(generate_keypair, _, State) ->
-	{PrivKey, State2} = rand:uniform_s(4294967295, State),
-	{PubKey, State3} = rand:uniform_s(4294967295, State2),
+	{PrivKey, State2} = rand:uniform_s(65535, State),
+	{PubKey, State3} = rand:uniform_s(65535, State2),
 	{reply, {PubKey, PrivKey}, State3}.
 
 handle_cast(_, State) -> {noreply, State}.
