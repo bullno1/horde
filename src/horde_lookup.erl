@@ -12,9 +12,13 @@
 -record(state, {
 	address :: horde:overlay_address(),
 	max_address :: horde:overlay_address(),
-	next_peers = gb_trees:empty(),
+	num_parallel_queries :: pos_integer(),
+	num_pending_queries :: non_neg_integer(),
+	next_peers = gb_trees:empty()
+		:: gb_trees:tree({non_neg_integer(), horde:endpoint()}, horde:endpoint()),
 	queried_peers = sets:new() :: sets:set(horde:endpoint()),
 	sender :: term(),
+	history = [],
 	horde :: pid()
 }).
 
@@ -41,6 +45,8 @@ init(#{
 		sender = Sender,
 		address = Address,
 		max_address = MaxAddress,
+		num_parallel_queries = NumParallelQueries,
+		num_pending_queries = length(InitialPeers),
 		next_peers = gb_trees:from_orddict([
 			{{Distance, Peer}, Peer} || {Distance, Peer} <- FallbackPeers
 		]),
@@ -48,28 +54,52 @@ init(#{
 			Peer || {_, Peer} <- InitialPeers
 		])
 	},
-	_ = [
-		horde:send_query(Horde, Peer, {lookup, Address})
+	Hist = [
+		{query, horde:send_query(Horde, Peer, {lookup, Address}), Peer}
 		|| {_, Peer} <- InitialPeers
 	],
-	{ok, State}.
+	{ok, State#state{history = lists:reverse(Hist)}}.
 
 handle_call(_, _, State) -> {stop, unimplemented, State}.
 
 handle_cast(_, State) -> {stop, unimplemented, State}.
 
-handle_info({horde, _, noreply}, State) ->
-	send_next_query(State);
 handle_info(
-	{horde, _, {reply, {peer_info, Peers}}},
-	#state{address = OverlayAddress, sender = Sender} = State
+	{horde, Ref, noreply},
+	#state{
+		history = History,
+		num_pending_queries = NumPendingQueries
+	} = State
 ) ->
+	send_next_query(State#state{
+		num_pending_queries = NumPendingQueries - 1,
+		history = [{noreply, Ref} | History]
+	});
+handle_info(
+	{horde, Ref, {reply, {peer_info, Peers}}},
+	#state{
+		address = OverlayAddress,
+		sender = Sender,
+		num_pending_queries = NumPendingQueries,
+		history = History
+	} = State
+) ->
+	State2 = State#state{
+		num_pending_queries = NumPendingQueries - 1,
+		history = [{reply, Ref, Peers} | History]
+	},
 	case lookup_finished(OverlayAddress, Peers) of
 		{true, TransportAddress} ->
+			%case
+				%length(State2#state.history) > State2#state.num_parallel_queries + 1
+			%of
+				%true -> report_history(State2);
+				%false -> ok
+			%end,
 			horde_utils:maybe_reply(Sender, {ok, TransportAddress}),
-			{stop, normal, State};
+			{stop, normal, State2};
 		false ->
-			send_next_query(add_next_peers(Peers, State))
+			send_next_query(add_next_peers(Peers, State2))
 	end;
 handle_info(Msg, State) ->
 	error_logger:warning_report([
@@ -126,21 +156,51 @@ send_next_query(
 	#state{
 		address = Address,
 		sender = Sender,
+		num_parallel_queries = NumParallelQueries,
+		num_pending_queries = NumPendingQueries,
 		next_peers = NextPeers,
 		queried_peers = QueriedPeers,
+		history = History,
 		horde = Horde
 	} = State
 ) ->
-	case gb_trees:size(NextPeers) =:= 0 of
-		true ->
+	NumNextPeers = gb_trees:size(NextPeers),
+	if
+		NumNextPeers =:= 0, NumPendingQueries =:= 0 ->
+			% Nothing more we could do
+			%report_history(State),
 			horde_utils:maybe_reply(Sender, error),
 			{stop, normal, State};
-		false ->
+		NumNextPeers =:= 0, NumPendingQueries > 0 ->
+			% Wait for pending queries to finish
+			{noreply, State};
+		NumPendingQueries >= NumParallelQueries ->
+			% Reached parallel queries limit, wait until some finishes
+			{noreply, State};
+		true ->
+			% Send next query
 			{_, NextPeer, NextPeers2} = gb_trees:take_smallest(NextPeers),
-			horde:send_query(Horde, NextPeer, {lookup, Address}),
+			Ref = horde:send_query(Horde, NextPeer, {lookup, Address}),
 			State2 = State#state{
 				next_peers = NextPeers2,
+				history = [{query, Ref, NextPeer} | History],
+				num_pending_queries = NumPendingQueries + 1,
 				queried_peers = sets:add_element(NextPeer, QueriedPeers)
 			},
-			{noreply, State2}
+			% Send more if we have not reached the limit
+			send_next_query(State2)
 	end.
+
+%report_history(#state{
+	%address = Address,
+	%max_address = MaxAddress,
+	%history = History
+%}) ->
+	%ForwardHistory = lists:reverse(History),
+	%Distances = [
+		%distance(Peer, Address, MaxAddress)
+		%|| {query, _, Peer} <- ForwardHistory
+	%],
+	%ct:pal("Target: ~p~nHistory: ~p~nDistances: ~p", [
+		%Address, ForwardHistory, Distances
+	%]).
