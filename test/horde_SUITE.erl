@@ -107,9 +107,9 @@ bootstrap(_Config) ->
 		Nodes
 	),
 	% Any node can lookup other nodes
-	lists:all(
+	lists:foreach(
 		fun(Node) ->
-			lists:all(
+			lists:foreach(
 				fun(OtherNode) ->
 					#{overlay := OverlayAddress, transport := TransportAddress}
 						= horde:info(OtherNode, address),

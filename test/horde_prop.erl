@@ -19,7 +19,7 @@ prop_horde() ->
 			begin
 				horde_fake_crypto:reset_seed([exs1024s, {S1, S2, S3}]),
 				{History, State, Result} = run_commands(?MODULE, Commands),
-				_ = [horde:stop(Node) || Node <- State#state.nodes],
+				_ = [catch horde:stop(Node) || Node <- State#state.nodes],
 
 				?WHENFAIL(
 					begin
@@ -88,6 +88,22 @@ postcondition(
 						{Node, Queries, {ok, TransportAddress}},
 						{Node, Queries, horde:lookup(Node, OverlayAddress, infinity)}
 					))
+			end,
+			Nodes
+		)
+	end);
+postcondition(
+	#state{nodes = Nodes},
+	{call, ?MODULE, node_leave, [LeftNode]},
+	Address
+) ->
+	with_fake_timers(fun() ->
+		lists:all(
+			fun(Node) ->
+				?WHEN(LeftNode =/= Node andalso (horde:info(Node, status) =:= ready),
+					begin
+						ok =:= ?assertEqual(pang, horde:ping(Node, {compound, Address}))
+					end)
 			end,
 			Nodes
 		)
