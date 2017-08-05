@@ -21,10 +21,12 @@ stop() -> gen_server:stop(?MODULE).
 
 % gen_server
 
-init(Opts) -> {ok, apply(rand, seed_s, Opts)}.
+init(Seed) -> {ok, apply(rand, seed_s, Seed)}.
 
 handle_call(max_address, _, State) ->
 	{reply, 65535, State};
+handle_call({reset_seed, Seed}, _, _State) ->
+	{reply, ok, apply(rand, seed_s, Seed)};
 handle_call(generate_keypair, _, State) ->
 	{PrivKey, State2} = rand:uniform_s(65535, State),
 	{PubKey, State3} = rand:uniform_s(65535, State2),

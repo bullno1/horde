@@ -1,5 +1,8 @@
 -module(horde_fake_crypto).
 -behaviour(horde_crypto).
+% API
+-export([reset_seed/1]).
+% horde_crypto
 -export([
 	init/1,
 	info/2,
@@ -10,6 +13,12 @@
 	serialize/3,
 	deserialize/3
 ]).
+
+% API
+
+reset_seed(Seed) -> gen_server:call(horde_fake_crypto_server, {reset_seed, Seed}).
+
+% horde_crypto
 
 init(_) -> [].
 

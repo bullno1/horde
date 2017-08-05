@@ -12,8 +12,12 @@
 
 prop_horde() ->
 	?TIMEOUT(5000,
-		?FORALL(Commands, commands(?MODULE),
+		?FORALL(
+			{Commands, S1, S2, S3},
+			{commands(?MODULE),
+			 non_neg_integer(), non_neg_integer(), non_neg_integer()},
 			begin
+				horde_fake_crypto:reset_seed([exs1024s, {S1, S2, S3}]),
 				{History, State, Result} = run_commands(?MODULE, Commands),
 				_ = [horde:stop(Node) || Node <- State#state.nodes],
 
