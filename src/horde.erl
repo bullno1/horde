@@ -70,9 +70,9 @@
 -type name() :: {local, atom()} | {via, module(), term()}.
 -type ref() :: pid() | atom() | {via, module(), term()}.
 -type opts() :: #{
-	crypto := horde_crypto:ctx(),
-	keypair := horde_crypto:keypair(),
-	transport := horde_crypto:ctx(),
+	address := overlay_address(),
+	max_address := overlay_address(),
+	transport := {module(), term()},
 	ring_check_interval => non_neg_integer(),
 	query_timeout => pos_integer(),
 	num_retries => non_neg_integer(),
@@ -99,10 +99,8 @@
 	timer :: reference() | undefined
 }).
 -record(state, {
-	crypto :: horde_crypto:ctx(),
 	address :: overlay_address(),
 	max_address :: overlay_address(),
-	keypair :: horde_crypto:keypair(),
 	transport :: horde_transport:ref(),
 	status = standalone :: standalone | {joining, reference()} | joining2 | ready,
 	join_waiters = [] :: list(),
@@ -187,27 +185,22 @@ stop(Ref) -> gen_server:stop(Ref).
 % gen_server
 
 init(#{
-	crypto := Crypto,
-	keypair := {PubKey, _} = KeyPair,
+	address := OverlayAddress,
+	max_address := MaxAddress,
 	transport := {TransportMod, TransportOpts}
 } = Opts) ->
 	case horde_transport:open(TransportMod, #{
-		crypto => Crypto,
-		keypair => KeyPair,
+		overlay_address => OverlayAddress,
 		transport_opts => TransportOpts
 	}) of
 		{ok, Transport} ->
 			horde_transport:recv_async(Transport),
-			OverlayAddress = horde_crypto:address_of(Crypto, PubKey),
 			RingCheckInterval = maps:get(ring_check_interval, Opts, 60000),
 			RingCheckTimer = ?TIME:start_timer(RingCheckInterval, self(), check_ring),
-			MaxAddress = horde_crypto:info(Crypto, max_address),
 			RevFun = fun(Addr) when is_integer(Addr) -> MaxAddress - Addr end,
 			State = #state{
-				crypto = Crypto,
 				address = OverlayAddress,
 				max_address = MaxAddress,
-				keypair = KeyPair,
 				transport = Transport,
 				ring = horde_ring:new(RevFun),
 				ring_check_timer = RingCheckTimer,

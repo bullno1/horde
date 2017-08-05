@@ -16,7 +16,7 @@ prop_horde() ->
 		{commands(?MODULE),
 		 non_neg_integer(), non_neg_integer(), non_neg_integer()},
 		begin
-			horde_fake_crypto:reset_seed([exs1024s, {S1, S2, S3}]),
+			horde_addr_gen:reset_seed([exs1024s, {S1, S2, S3}]),
 			{History, State, Result} = run_commands(?MODULE, Commands),
 			_ = [catch horde:stop(Node) || Node <- State#state.nodes],
 
@@ -193,30 +193,3 @@ format_state(State) ->
 			tl(tuple_to_list(State))
 		)
 	).
-
-format_history(History, Cmd) -> format_history(History, Cmd, #{}).
-
-format_history([], [], _) ->
-	ok;
-format_history(_, [], _) ->
-	ok;
-format_history([], [Cmd | _], Vars) ->
-	format_command(Cmd, crash, Vars);
-format_history([{State, Result} | History], [Cmd | Cmds], Vars) ->
-	io:format(user, "State: ~p~n", [format_state(State)]),
-	Vars2 = format_command(Cmd, Result, Vars),
-	io:format(user, "~n", []),
-	format_history(History, Cmds, Vars2).
-
-format_command({set, {var, Var}, {call, M, F, A}}, Result, Vars) ->
-	RenderedArgs = lists:map(fun(Arg) -> replace_symbol(Arg, Vars) end, A),
-	io:format(user,
-		"Var~p = ~p:~p~p % ~p~n",
-		[Var, M, F, RenderedArgs, Result]
-	),
-	Vars#{Var => Result};
-format_command(Cmd, Result, _) ->
-	io:format(user, "~p -> ~p~n", [Cmd, Result]).
-
-replace_symbol({var, Var}, Vars) -> maps:get(Var, Vars);
-replace_symbol(X, _Vars) -> X.

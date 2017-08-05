@@ -22,11 +22,11 @@ end_per_suite(Config) ->
 
 init_per_testcase(_Testcase, Config) ->
 	fake_time:start_link(),
-	horde_fake_crypto_server:start_link([exs1024s, {123, 123534, 345345}]),
+	horde_addr_gen:start_link([exs1024s, {123, 123534, 345345}]),
 	Config.
 
 end_per_testcase(_Testcase, _Config) ->
-	horde_fake_crypto_server:stop(),
+	horde_addr_gen:stop(),
 	fake_time:stop(),
 	ok.
 

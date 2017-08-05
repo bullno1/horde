@@ -15,12 +15,10 @@
 -type ctx() :: #{
 	module := module(),
 	controlling_process := pid(),
-	crypto := horde_crypto:ctx(),
-	keypair := horde_crypto:keypair()
+	overlay_address := horde:overlay_address()
 }.
 -type opts() :: #{
-	crypto := horde_crypto:ctx(),
-	keypair := horde_crypto:keypair(),
+	overlay_address := horde:overlay_address(),
 	transport_opts := term()
 }.
 -type event()
@@ -56,13 +54,12 @@
 -spec open(module(), opts()) -> {ok, ref()} | {error, term()}.
 open(
 	Module,
-	#{crypto := Crypto, keypair := Keypair, transport_opts := TransportOpts}
+	#{overlay_address := OverlayAddress, transport_opts := TransportOpts}
 ) ->
 	Ctx = #{
 		module => Module,
 		controlling_process => self(),
-		crypto => Crypto,
-		keypair => Keypair
+		overlay_address => OverlayAddress
 	},
 	case Module:open(Ctx, TransportOpts) of
 		{ok, Ref} -> {ok, {Module, Ref}};
@@ -92,9 +89,6 @@ notify(
 
 -spec compound_address(ctx(), term()) -> horde:compound_address().
 compound_address(
-	#{crypto := Crypto, keypair := {PubKey, _}, module := Module}, TransportAddress
+	#{overlay_address := OverlayAddress, module := Module}, TransportAddress
 ) ->
-	#{
-		overlay => horde_crypto:address_of(Crypto, PubKey),
-		transport => {Module, TransportAddress}
-	}.
+	#{overlay => OverlayAddress, transport => {Module, TransportAddress}}.
