@@ -31,7 +31,7 @@ no_self_join(_Config) ->
 	horde:stop(Node).
 
 props(_Config) ->
-	?assertEqual([], proper:module(horde_prop, [5000, {to_file, user}])).
+	?assertEqual([], proper:module(horde_prop, [10000, {to_file, user}])).
 
 bootstrap() -> [{timetrap, 5000}].
 
