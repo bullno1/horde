@@ -91,10 +91,9 @@ postcondition(
 			end,
 			Nodes
 		)
-	end),
-	fake_time:get_timers() =/= [];
+	end);
 postcondition(_State, {call, _Mod, _Fun, _Args}, _Res) ->
-	fake_time:get_timers() =/= [].
+	true.
 
 next_state(
 	#state{} = State,
