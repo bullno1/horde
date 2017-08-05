@@ -163,11 +163,23 @@ join_async(Ref, BootstrapNodes) when length(BootstrapNodes) > 0 ->
 wait_join(Ref, Timeout) ->
 	gen_server:call(Ref, wait_join, Timeout).
 
+-spec ping(ref(), endpoint()) -> pong | pang.
+ping(Ref, Endpoint) ->
+	case send_query_sync(Ref, Endpoint, ping) of
+		{reply, _} -> pong;
+		noreply -> pang
+	end.
+
 -spec send_query_async(ref(), endpoint(), message_body()) -> reference().
 send_query_async(Ref, Endpoint, Message) ->
 	QueryRef = make_ref(),
 	gen_server:cast(Ref, {send_query, QueryRef, self(), Endpoint, Message}),
 	QueryRef.
+
+-spec send_query_sync(ref(), endpoint(), message_body()) ->
+	{reply, message_body()} | noreply.
+send_query_sync(Ref, Endpoint, Message) ->
+	gen_server:call(Ref, {send_query, Endpoint, Message}, infinity).
 
 -spec stop(ref()) -> ok.
 stop(Ref) -> gen_server:stop(Ref).
@@ -243,6 +255,9 @@ handle_call(
 	EndpointsOfPeers = [{compound, Addr} || #{address := Addr} <- Peers],
 	_ = start_lookup(Address, EndpointsOfPeers, {sync, From}, State),
 	{noreply, State};
+handle_call({send_query, Endpoint, Message}, {_Pid, QueryRef} = From, State) ->
+	State2 = start_query(QueryRef, {sync, From}, Endpoint, Message, State),
+	{noreply, State2};
 handle_call({query_info, QueryRef}, _From, #state{queries = Queries} = State) ->
 	Result =
 		case maps:find(QueryRef, Queries) of
