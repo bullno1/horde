@@ -9,7 +9,7 @@ all() ->
 	 props].
 
 groups() ->
-	[{unstable, [{repeat_until_any_fail, 50}], [bootstrap]}].
+	[{unstable, [{repeat_until_any_fail, 10}], [bootstrap]}].
 
 init_per_suite(Config) ->
 	{ok, Apps} = application:ensure_all_started(horde),

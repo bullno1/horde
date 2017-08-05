@@ -11,25 +11,22 @@
 % Property
 
 prop_horde() ->
-	?TIMEOUT(30000,
-		?FORALL(
-			{Commands, S1, S2, S3},
-			{commands(?MODULE),
-			 non_neg_integer(), non_neg_integer(), non_neg_integer()},
-			begin
-				horde_fake_crypto:reset_seed([exs1024s, {S1, S2, S3}]),
-				{History, State, Result} = run_commands(?MODULE, Commands),
-				_ = [catch horde:stop(Node) || Node <- State#state.nodes],
+	?FORALL(
+		{Commands, S1, S2, S3},
+		{commands(?MODULE),
+		 non_neg_integer(), non_neg_integer(), non_neg_integer()},
+		begin
+			horde_fake_crypto:reset_seed([exs1024s, {S1, S2, S3}]),
+			{History, State, Result} = run_commands(?MODULE, Commands),
+			_ = [catch horde:stop(Node) || Node <- State#state.nodes],
 
-				?WHENFAIL(
-					begin
-						format_history(History, Commands),
-						io:format(user, "Last state: ~p~n", [format_state(State)]),
-						io:format(user, "Result: ~p~n", [Result])
-					end,
-					aggregate(command_names(Commands), Result =:= ok)
-				)
-			end)).
+			?WHENFAIL(
+				io:format(user, "Commands:~n~s~nHistory: ~p~nState: ~p~nResult: ~p~n", [
+					pretty_print(Commands), History, State, Result
+				]),
+				aggregate(command_names(Commands), Result =:= ok)
+			)
+		end).
 
 % Model
 
@@ -65,7 +62,7 @@ postcondition(
 		lists:all(
 			fun(Node) ->
 				?WHEN(Node =/= NewNode andalso horde:info(Node, status) =:= ready,
-					ok =:= ?assertEqual(error, horde:lookup(Node, NodeAddress, infinity)))
+					ok =:= ?assertEqual(error, horde:lookup(Node, NodeAddress, 5000)))
 			end,
 			Nodes
 		)
@@ -77,7 +74,7 @@ postcondition(
 ) ->
 	with_fake_timers(fun() ->
 		#{transport := TransportAddress, overlay := OverlayAddress} =
-			horde:info(JoinedNode, address),
+			CompoundAddress = horde:info(JoinedNode, address),
 		?assert(Joined),
 		?assertEqual(ready, horde:info(JoinedNode, status)),
 		lists:all(
@@ -86,27 +83,23 @@ postcondition(
 				?WHEN(horde:info(Node, status) =:= ready,
 					ok =:= ?assertEqual(
 						{Node, Queries, {ok, TransportAddress}},
-						{Node, Queries, horde:lookup(Node, OverlayAddress, infinity)}
+						{Node, Queries, horde:lookup(Node, OverlayAddress, 5000)}
 					))
+					andalso
+					ok =:= ?assertEqual(
+						pong, horde:ping(Node, {compound, CompoundAddress})
+					)
 			end,
 			Nodes
 		)
 	end);
 postcondition(
-	#state{nodes = Nodes},
-	{call, ?MODULE, node_leave, [LeftNode]},
+	#state{bootstrap_node = BootstrapNode},
+	{call, ?MODULE, node_leave, [_]},
 	Address
 ) ->
 	with_fake_timers(fun() ->
-		lists:all(
-			fun(Node) ->
-				?WHEN(LeftNode =/= Node andalso (horde:info(Node, status) =:= ready),
-					begin
-						ok =:= ?assertEqual(pang, horde:ping(Node, {compound, Address}))
-					end)
-			end,
-			Nodes
-		)
+		ok =:= ?assertEqual(pang, horde:ping(BootstrapNode, {compound, Address}))
 	end);
 postcondition(_State, {call, _Mod, _Fun, _Args}, _Res) ->
 	true.
@@ -143,7 +136,7 @@ new_node() -> horde_test_utils:create_node().
 node_join(Node, BootstrapNode) ->
 	with_fake_timers(fun() ->
 		#{transport := TransportAddress} = horde:info(BootstrapNode, address),
-		horde:join(Node, [{transport, TransportAddress}], infinity)
+		horde:join(Node, [{transport, TransportAddress}], 5000)
 	end).
 
 node_leave(Node) ->
