@@ -65,7 +65,7 @@ postcondition(
 		lists:all(
 			fun(Node) ->
 				?WHEN(Node =/= NewNode andalso horde:info(Node, status) =:= ready,
-					ok =:= ?assertEqual(error, horde:lookup(Node, NodeAddress, 300)))
+					ok =:= ?assertEqual(error, horde:lookup(Node, NodeAddress, infinity)))
 			end,
 			Nodes
 		)
@@ -86,7 +86,7 @@ postcondition(
 				?WHEN(horde:info(Node, status) =:= ready,
 					ok =:= ?assertEqual(
 						{Node, Queries, {ok, TransportAddress}},
-						{Node, Queries, horde:lookup(Node, OverlayAddress, 300)}
+						{Node, Queries, horde:lookup(Node, OverlayAddress, infinity)}
 					))
 			end,
 			Nodes
@@ -127,7 +127,7 @@ new_node() -> horde_test_utils:create_node().
 node_join(Node, BootstrapNode) ->
 	with_fake_timers(fun() ->
 		#{transport := TransportAddress} = horde:info(BootstrapNode, address),
-		horde:join(Node, [{transport, TransportAddress}], 300)
+		horde:join(Node, [{transport, TransportAddress}], infinity)
 	end).
 
 node_leave(Node) ->
