@@ -1,5 +1,6 @@
 -module(horde_lookup).
 -behaviour(gen_server).
+% API
 -export([start_link/1]).
 % gen_server
 -export([
@@ -8,57 +9,43 @@
 	handle_cast/2,
 	handle_info/2
 ]).
+% Internal
+-export([proc_entry/2]).
 
 -record(state, {
+	horde :: pid(),
+	sender :: horde_utils:reply_to(),
 	address :: horde:overlay_address(),
 	max_address :: horde:overlay_address(),
 	num_parallel_queries :: pos_integer(),
-	num_pending_queries :: non_neg_integer(),
-	next_peers = gb_trees:empty()
+	num_pending_queries = 0 :: non_neg_integer(),
+	next_resolvers = gb_trees:empty()
 		:: gb_trees:tree({non_neg_integer(), horde:endpoint()}, horde:endpoint()),
-	queried_peers = sets:new() :: sets:set(horde:endpoint()),
-	sender :: term(),
-	history = [],
-	horde :: pid()
+	queried_resolvers = sets:new() :: sets:set(horde:endpoint()),
+	history = []
 }).
 
-start_link(Opts) -> gen_server:start_link(?MODULE, Opts, []).
+% API
+
+start_link(Opts) -> proc_lib:start_link(?MODULE, proc_entry, [self(), Opts]).
+
+% gen_server
 
 init(#{
 	horde := Horde,
 	sender := Sender,
 	address := Address,
-	peers := Peers,
 	max_address := MaxAddress,
 	num_parallel_queries := NumParallelQueries
 }) ->
-	SortedPeers = lists:sort([
-		{distance(Peer, Address, MaxAddress), Peer} || Peer <- Peers
-	]),
-	{InitialPeers, FallbackPeers} =
-		case NumParallelQueries > length(SortedPeers) of
-			true -> {SortedPeers, []};
-			false -> lists:split(NumParallelQueries, SortedPeers)
-		end,
 	State = #state{
 		horde = Horde,
 		sender = Sender,
 		address = Address,
 		max_address = MaxAddress,
-		num_parallel_queries = NumParallelQueries,
-		num_pending_queries = length(InitialPeers),
-		next_peers = gb_trees:from_orddict([
-			{{Distance, Peer}, Peer} || {Distance, Peer} <- FallbackPeers
-		]),
-		queried_peers = sets:from_list([
-			Peer || {_, Peer} <- InitialPeers
-		])
+		num_parallel_queries = NumParallelQueries
 	},
-	Hist = [
-		{query, horde:send_query(Horde, Peer, {lookup, Address}), Peer}
-		|| {_, Peer} <- InitialPeers
-	],
-	{ok, State#state{history = lists:reverse(Hist)}}.
+	{ok, State}.
 
 handle_call(_, _, State) -> {stop, unimplemented, State}.
 
@@ -96,17 +83,29 @@ handle_info(
 				%true -> report_history(State2);
 				%false -> ok
 			%end,
-			horde_utils:maybe_reply(Sender, {ok, TransportAddress}),
+			horde_utils:maybe_reply(horde, Sender, {ok, TransportAddress}),
 			{stop, normal, State2};
 		false ->
-			send_next_query(add_next_peers(Peers, State2))
+			Endpoints = [{compound, Address} || #{overlay := Address} <- Peers],
+			send_next_query(add_resolvers(Endpoints, State2))
 	end;
 handle_info(Msg, State) ->
 	error_logger:warning_report([
-		{?MODULE, "Unexpected message"},
-		{message, Msg}
+		"Unexpected message", {module, ?MODULE}, {message, Msg}
 	]),
 	{noreply, State}.
+
+% Internal
+
+proc_entry(Parent, #{resolvers := Resolvers} = Opts) ->
+	{ok, State} = init(Opts),
+	proc_lib:init_ack(Parent, {ok, self()}),
+	case send_next_query(add_resolvers(Resolvers, State)) of
+		{noreply, State2} ->
+			gen_server:enter_loop(?MODULE, [], State2);
+		{stop, Reason, _} ->
+			exit(Reason)
+	end.
 
 % Private
 
@@ -114,30 +113,29 @@ distance({transport, _}, _, MaxAddress) -> MaxAddress;
 distance({compound, #{overlay := From}}, To, MaxAddress) ->
 	min(abs(To - From), MaxAddress + 1 - max(From, To) + min(From, To)).
 
-add_next_peers(
-	Peers,
+add_resolvers(
+	Resolvers,
 	#state{
 		address = LookupAddress,
 		max_address = MaxAddress,
-		queried_peers = QueriedPeers,
-		next_peers = NextPeers
+		queried_resolvers = QueriedResolvers,
+		next_resolvers = NextResolvers
 	} = State
 ) ->
-	NextPeers2 = lists:foldl(
-		fun(#{address := Address}, Acc) ->
-			Peer = {compound, Address},
-			case sets:is_element(Peer, QueriedPeers) of
+	NextResolvers2 = lists:foldl(
+		fun(Resolver, Acc) ->
+			case sets:is_element(Resolver, QueriedResolvers) of
 				true ->
 					Acc;
 				false ->
-					Distance = distance(Peer, LookupAddress, MaxAddress),
-					gb_trees:enter({Distance, Peer}, Peer, Acc)
+					Distance = distance(Resolver, LookupAddress, MaxAddress),
+					gb_trees:enter({Distance, Resolver}, Resolver, Acc)
 			end
 		end,
-		NextPeers,
-		Peers
+		NextResolvers,
+		Resolvers
 	),
-	State#state{next_peers = NextPeers2}.
+	State#state{next_resolvers = NextResolvers2}.
 
 lookup_finished(LookupAddress, Peers) ->
 	case lists:dropwhile(
@@ -158,20 +156,20 @@ send_next_query(
 		sender = Sender,
 		num_parallel_queries = NumParallelQueries,
 		num_pending_queries = NumPendingQueries,
-		next_peers = NextPeers,
-		queried_peers = QueriedPeers,
+		next_resolvers = NextResolvers,
+		queried_resolvers = QueriedResolvers,
 		history = History,
 		horde = Horde
 	} = State
 ) ->
-	NumNextPeers = gb_trees:size(NextPeers),
+	NumNextResolvers = gb_trees:size(NextResolvers),
 	if
-		NumNextPeers =:= 0, NumPendingQueries =:= 0 ->
+		NumNextResolvers =:= 0, NumPendingQueries =:= 0 ->
 			% Nothing more we could do
 			%report_history(State),
-			horde_utils:maybe_reply(Sender, error),
+			horde_utils:maybe_reply(horde, Sender, error),
 			{stop, normal, State};
-		NumNextPeers =:= 0, NumPendingQueries > 0 ->
+		NumNextResolvers =:= 0, NumPendingQueries > 0 ->
 			% Wait for pending queries to finish
 			{noreply, State};
 		NumPendingQueries >= NumParallelQueries ->
@@ -179,13 +177,13 @@ send_next_query(
 			{noreply, State};
 		true ->
 			% Send next query
-			{_, NextPeer, NextPeers2} = gb_trees:take_smallest(NextPeers),
-			Ref = horde:send_query(Horde, NextPeer, {lookup, Address}),
+			{_, NextResolver, NextResolvers2} = gb_trees:take_smallest(NextResolvers),
+			Ref = horde:send_query_async(Horde, NextResolver, {lookup, Address}),
 			State2 = State#state{
-				next_peers = NextPeers2,
-				history = [{query, Ref, NextPeer} | History],
+				next_resolvers = NextResolvers2,
+				history = [{query, Ref, NextResolver} | History],
 				num_pending_queries = NumPendingQueries + 1,
-				queried_peers = sets:add_element(NextPeer, QueriedPeers)
+				queried_resolvers = sets:add_element(NextResolver, QueriedResolvers)
 			},
 			% Send more if we have not reached the limit
 			send_next_query(State2)

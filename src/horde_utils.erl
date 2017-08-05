@@ -1,11 +1,13 @@
 -module(horde_utils).
 -export([
-	maybe_reply/2,
+	maybe_reply/3,
 	is_address_between/3,
 	is_address_between/5
 ]).
+-export_type([order_fun/1, reply_to/0]).
 
 -type order_fun(T) :: fun((T, T) -> boolean()).
+-type reply_to() :: none | {sync | async, {pid(), any()}}.
 
 -spec is_address_between(T, T, T) -> boolean().
 is_address_between(Address, Lowerbound, Upperbound) ->
@@ -25,6 +27,12 @@ is_address_between(
 			orelse UpperboundCheck(Address, Upperbound)
 	end.
 
--spec maybe_reply(none | pid(), term()) -> ok.
-maybe_reply(none, _Msg) -> ok;
-maybe_reply(From, Msg) -> gen_server:reply(From, Msg).
+-spec maybe_reply(module(), reply_to(), term()) -> ok.
+maybe_reply(_Module, none, _Msg) ->
+	ok;
+maybe_reply(Module, {async, {Pid, Tag}}, Msg) ->
+	Pid ! {Module, Tag, Msg},
+	ok;
+maybe_reply(_Module, {sync, Client}, Msg) ->
+	gen_server:reply(Client, Msg),
+	ok.

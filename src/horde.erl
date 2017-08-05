@@ -8,9 +8,14 @@
 	info/2,
 	join/3,
 	join_async/2,
-	stop/1,
 	wait_join/2,
-	send_query/3,
+	ping/2,
+	stop/1
+]).
+% Low-level API
+-export([
+	send_query_async/3,
+	send_query_sync/3,
 	query_info/2
 ]).
 % gen_server
@@ -68,7 +73,6 @@
 	crypto := horde_crypto:ctx(),
 	keypair := horde_crypto:keypair(),
 	transport := horde_crypto:ctx(),
-	bootstrap_nodes => [horde_transport:address()],
 	ring_check_interval => non_neg_integer(),
 	query_timeout => pos_integer(),
 	num_retries => non_neg_integer(),
@@ -79,7 +83,7 @@
 	min_slice_size => pos_integer()
 }.
 -type query_info() :: #{
-	sender := pid() | none,
+	sender := horde_utils:reply_to(),
 	destination := endpoint(),
 	message := message_body(),
 	num_retries := non_neg_integer(),
@@ -88,7 +92,7 @@
 -type join_status() :: standalone | joining | ready.
 
 -record(query, {
-	sender :: pid() | none,
+	sender :: horde_utils:reply_to(),
 	destination :: endpoint(),
 	message :: message_body(),
 	num_retries :: non_neg_integer(),
@@ -152,15 +156,15 @@ join(Ref, BootstrapNodes, Timeout) ->
 	wait_join(Ref, Timeout).
 
 -spec join_async(ref(), [endpoint()]) -> ok.
-join_async(Ref, BootstrapNodes) ->
+join_async(Ref, BootstrapNodes) when length(BootstrapNodes) > 0 ->
 	gen_server:cast(Ref, {join, BootstrapNodes}).
 
 -spec wait_join(ref(), timeout()) -> boolean().
 wait_join(Ref, Timeout) ->
 	gen_server:call(Ref, wait_join, Timeout).
 
--spec send_query(ref(), endpoint(), message_body()) -> reference().
-send_query(Ref, Endpoint, Message) ->
+-spec send_query_async(ref(), endpoint(), message_body()) -> reference().
+send_query_async(Ref, Endpoint, Message) ->
 	QueryRef = make_ref(),
 	gen_server:cast(Ref, {send_query, QueryRef, self(), Endpoint, Message}),
 	QueryRef.
@@ -204,12 +208,7 @@ init(#{
 				num_neighbours = maps:get(num_neighbours, Opts, 5),
 				min_slice_size = maps:get(min_slice_size, Opts, 2)
 			},
-			% Bootstrap
-			BootstrapNodes = maps:get(bootstrap_nodes, Opts, []),
-			case maybe_bootstrap(BootstrapNodes, State) of
-				{ok, _} = Ret -> Ret;
-				{error, Reason} -> {stop, Reason}
-			end;
+			{ok, State};
 		{error, Reason} ->
 			{stop, Reason}
 	end.
@@ -241,8 +240,8 @@ handle_call(
 		horde_ring:successors(OwnAddress, NumNeighbours, Ring),
 		horde_ring:predecessors(OwnAddress, NumNeighbours, Ring)
 	]),
-	LookupPeers = [{compound, Addr} || #{address := Addr} <- Peers],
-	_ = start_lookup(Address, LookupPeers, From, State),
+	EndpointsOfPeers = [{compound, Addr} || #{address := Addr} <- Peers],
+	_ = start_lookup(Address, EndpointsOfPeers, {sync, From}, State),
 	{noreply, State};
 handle_call({query_info, QueryRef}, _From, #state{queries = Queries} = State) ->
 	Result =
@@ -256,31 +255,27 @@ handle_call({query_info, QueryRef}, _From, #state{queries = Queries} = State) ->
 handle_call({info, What}, _From, State) ->
 	{reply, extract_info(What, State), State}.
 
-handle_cast({join, BootstrapNodes}, #state{status = standalone} = State) ->
-	case maybe_bootstrap(BootstrapNodes, State) of
-		{ok, State2} ->
-			{noreply, State2};
-		{error, _} ->
+handle_cast(
+	{join, BootstrapNodes},
+	#state{address = OwnAddress, status = standalone} = State
+) ->
+	case start_lookup(OwnAddress, BootstrapNodes, none, State) of
+		{ok, Pid} ->
+			MonitorRef = erlang:monitor(process, Pid),
+			{noreply, State#state{status = {joining, MonitorRef}}};
+		{error, Reason} ->
+			error_logger:error_report([
+				"Error while trying to join",
+				{module, ?MODULE},
+				{error, Reason}
+			]),
 			{noreply, State}
 	end;
 handle_cast({join, _}, State) ->
 	{noreply, State};
-handle_cast(
-	{send_query, Ref, Sender, Endpoint, Message},
-	#state{
-		num_retries = NumRetries,
-		num_nodes_probed = NumNodesProbed
-	} = State
-) ->
-	Query = #query{
-		sender = Sender,
-		destination = Endpoint,
-		message = Message,
-		num_retries = NumRetries
-	},
-	State2 = send_query1(Ref, Query, State),
-	State3 = State2#state{num_nodes_probed = NumNodesProbed + 1},
-	{noreply, State3}.
+handle_cast({send_query, Ref, Sender, Endpoint, Message}, State) ->
+	State2 = start_query(Ref, {async, {Sender, Ref}}, Endpoint, Message, State),
+	{noreply, State2}.
 
 handle_info(Msg, State) ->
 	{noreply, check_join_status(handle_info1(Msg, State))}.
@@ -294,22 +289,11 @@ format_status(_Opt, [_PDict, State]) ->
 
 % Private
 
-maybe_bootstrap([], State) ->
-	{ok, State};
-maybe_bootstrap(BootstrapNodes, #state{address = OwnAddress} = State) ->
-	case start_lookup(OwnAddress, BootstrapNodes, none, State) of
-		{ok, Pid} ->
-			MonitorRef = erlang:monitor(process, Pid),
-			{ok, State#state{status = {joining, MonitorRef}}};
-		{error, _} = Err ->
-			Err
-	end.
-
 start_lookup(_, [], ReplyTo, _State) ->
-	horde_utils:maybe_reply(ReplyTo, error),
-	{error, no_peers};
+	horde_utils:maybe_reply(?MODULE, ReplyTo, error),
+	{error, no_resolver};
 start_lookup(
-	Address, Peers, ReplyTo,
+	Address, Resolvers, ReplyTo,
 	#state{
 		num_parallel_queries = NumParallelQueries,
 		max_address = MaxAddress
@@ -319,19 +303,16 @@ start_lookup(
 		horde => self(),
 		sender => ReplyTo,
 		address => Address,
-		peers => Peers,
+		resolvers => Resolvers,
 		max_address => MaxAddress,
 		num_parallel_queries => NumParallelQueries
 	},
 	horde_lookup:start_link(LookupArgs).
 
-maybe_ping(
-	Address,
-	#state{queries = Queries, num_retries = NumRetries} = State
-) ->
+maybe_ping(Endpoint, #state{queries = Queries} = State) ->
 	IsQueryingAddress = lists:any(
 		fun(#query{destination = Destination}) ->
-			Destination =:= Address
+			Destination =:= Endpoint
 		end,
 		maps:values(Queries)
 	),
@@ -339,13 +320,7 @@ maybe_ping(
 		true ->
 			State;
 		false ->
-			Query = #query{
-				sender = none,
-				destination = Address,
-				message = ping,
-				num_retries = NumRetries
-			},
-			send_query1(make_ref(), Query, State)
+			start_query(make_ref(), none, Endpoint, ping, State)
 	end.
 
 handle_overlay_message(
@@ -452,15 +427,16 @@ handle_query_reply(
 	Id, #query{sender = Sender, destination = Destination, timer = Timer},
 	#state{queries = Queries} = State
 ) ->
-	IsCorrectReply =
+	% Check whether reply comes from the queried address
+	IsValidReply =
 		case Destination of
 			{compound, CompoundAddress} -> true;
 			{transport, TransportAddress} -> true;
 			_ -> false
 		end,
-	case IsCorrectReply of
+	case IsValidReply of
 		true ->
-			_ = maybe_send(Sender, {?MODULE, Id, {reply, Message}}),
+			_ = horde_utils:maybe_reply(?MODULE, Sender, {reply, Message}),
 			_ = ?TIME:cancel_timer(Timer),
 			State#state{queries = maps:remove(Id, Queries)};
 		false ->
@@ -486,7 +462,7 @@ handle_query_timeout(
 	Id, #query{num_retries = 0, sender = Sender, destination = Destination},
 	#state{queries = Queries, num_nodes_failed = NumNodesFailed} = State
 ) ->
-	_ = maybe_send(Sender, {?MODULE, Id, noreply}),
+	_ = horde_utils:maybe_reply(?MODULE, Sender, noreply),
 	State2 = State#state{
 		queries = maps:remove(Id, Queries),
 		num_nodes_failed = NumNodesFailed + 1
@@ -497,7 +473,7 @@ handle_query_timeout(
 	State
 ) ->
 	Query2 = Query#query{num_retries = NumRetries - 1},
-	send_query1(Id, Query2, State).
+	do_send_query(Id, Query2, State).
 
 handle_transport_error(
 	Id, #query{timer = TimerRef} = Query,
@@ -511,7 +487,23 @@ handle_transport_error(
 		queries = Queries#{Id := Query2}
 	}.
 
-send_query1(
+start_query(
+	Ref, Sender, Destination, Message,
+	#state{
+		num_retries = NumRetries,
+		num_nodes_probed = NumNodesProbed
+	} = State
+) ->
+	Query = #query{
+		sender = Sender,
+		destination = Destination,
+		message = Message,
+		num_retries = NumRetries
+	},
+	State2 = do_send_query(Ref, Query, State),
+	State2#state{num_nodes_probed = NumNodesProbed + 1}.
+
+do_send_query(
 	Id,
 	#query{destination = Destination, message = Message} = Query,
 	#state{
@@ -651,8 +643,7 @@ handle_info1(
 	dispatch_query_event(Error, fun handle_query_error/4, Id, State);
 handle_info1(Msg, State) ->
 	error_logger:warning_report([
-		{?MODULE, "Unexpected message"},
-		{message, Msg}
+		"Unexpected message", {module, ?MODULE}, {message, Msg}
 	]),
 	State.
 
@@ -854,6 +845,3 @@ overlay_address(#{overlay := Address}) -> Address.
 
 set_of(undefined) -> [];
 set_of(Element) -> [Element].
-
-maybe_send(none, _) -> ok;
-maybe_send(Client, Result) -> Client ! Result.
