@@ -11,6 +11,23 @@
 ]).
 % Internal
 -export([proc_entry/2]).
+-ifdef(TEST).
+-define(REPORT_HISTORY(State), report_history(State)).
+-else.
+-define(REPORT_HISTORY(State), ok).
+-endif.
+
+-type history()
+	:: {query, #{
+		reference := reference(),
+		endpoint := [horde:endpoint()],
+		distance := non_neg_integer()
+		}}
+	 | {reply, #{
+		reference := reference(),
+		result := [horde:node_info()]
+		}}
+	 | {noreply, reference()}.
 
 -record(state, {
 	horde :: pid(),
@@ -22,7 +39,7 @@
 	next_resolvers = gb_trees:empty()
 		:: gb_trees:tree({non_neg_integer(), horde:endpoint()}, horde:endpoint()),
 	queried_resolvers = sets:new() :: sets:set(horde:endpoint()),
-	history = []
+	history = [] :: [history()]
 }).
 
 % API
@@ -73,20 +90,20 @@ handle_info(
 ) ->
 	State2 = State#state{
 		num_pending_queries = NumPendingQueries - 1,
-		history = [{reply, Ref, Peers} | History]
+		history = [{reply, #{reference => Ref, result => Peers}} | History]
 	},
 	case lookup_finished(OverlayAddress, Peers) of
 		{true, TransportAddress} ->
 			%case
 				%length(State2#state.history) > State2#state.num_parallel_queries + 1
 			%of
-				%true -> report_history(State2);
+				%true -> ?REPORT_HISTORY(State2);
 				%false -> ok
 			%end,
 			horde_utils:maybe_reply(horde, Sender, {ok, TransportAddress}),
 			{stop, normal, State2};
 		false ->
-			Endpoints = [{compound, Address} || #{overlay := Address} <- Peers],
+			Endpoints = [{compound, Address} || #{address := Address} <- Peers],
 			send_next_query(add_resolvers(Endpoints, State2))
 	end;
 handle_info(Msg, State) ->
@@ -166,7 +183,12 @@ send_next_query(
 	if
 		NumNextResolvers =:= 0, NumPendingQueries =:= 0 ->
 			% Nothing more we could do
-			%report_history(State),
+			%case length(History) > 2 of
+				%true ->
+					%?REPORT_HISTORY(State);
+				%false ->
+					%ok
+			%end,
 			horde_utils:maybe_reply(horde, Sender, error),
 			{stop, normal, State};
 		NumNextResolvers =:= 0, NumPendingQueries > 0 ->
@@ -177,11 +199,18 @@ send_next_query(
 			{noreply, State};
 		true ->
 			% Send next query
-			{_, NextResolver, NextResolvers2} = gb_trees:take_smallest(NextResolvers),
+			{{Distance, _}, NextResolver, NextResolvers2} =
+				gb_trees:take_smallest(NextResolvers),
 			Ref = horde:send_query_async(Horde, NextResolver, {lookup, Address}),
 			State2 = State#state{
 				next_resolvers = NextResolvers2,
-				history = [{query, Ref, NextResolver} | History],
+				history = [
+					{query, #{
+						reference => Ref,
+						endpoint => NextResolver,
+						distance => Distance
+					}} | History
+				],
 				num_pending_queries = NumPendingQueries + 1,
 				queried_resolvers = sets:add_element(NextResolver, QueriedResolvers)
 			},
@@ -190,17 +219,41 @@ send_next_query(
 	end.
 
 -ifdef(TEST).
-report_history(#state{
-	address = Address,
-	max_address = MaxAddress,
-	history = History
-}) ->
+report_history(#state{address = Address, history = History}) ->
 	ForwardHistory = lists:reverse(History),
-	Distances = [
-		distance(Peer, Address, MaxAddress)
-		|| {query, _, Peer} <- ForwardHistory
-	],
-	ct:pal("Target: ~p~nHistory: ~p~nDistances: ~p", [
-		Address, ForwardHistory, Distances
+	ct:pal("Target: ~p~nDistances: ~w~nHistory: ~n~s", [
+		Address,
+		[Distance || {query, #{distance := Distance}} <- ForwardHistory],
+		format_history(ForwardHistory)
 	]).
+
+format_history(History) -> format_history(History, #{}, []).
+
+format_history([], Mappings, Acc) ->
+	lists:reverse(Acc);
+format_history([Event | Rest], Mappings, Acc) ->
+	{NewLine, NewMappings} = case Event of
+		{query, #{reference := Ref, endpoint := Endpoint, distance := Distance}} ->
+			QueryNo = maps:size(Mappings) + 1,
+			Line = io_lib:format(
+				"send #~p (distance: ~p) -> ~p~n",
+				[QueryNo, Distance, Endpoint]
+			),
+			{Line, Mappings#{Ref => QueryNo}};
+		{reply, #{reference := Ref, result := Peers}} ->
+			QueryNo = maps:get(Ref, Mappings),
+			Line = io_lib:format(
+				"recv #~p: ~p~n",
+				[QueryNo, [Address || #{address := Address} <- Peers]]
+			),
+			{Line, Mappings};
+		{noreply, Ref} ->
+			QueryNo = maps:get(Ref, Mappings),
+			Line = io_lib:format(
+				"fail #~p",
+				[QueryNo]
+			),
+			{Line, Mappings}
+	end,
+	format_history(Rest, NewMappings, [NewLine | Acc]).
 -endif.

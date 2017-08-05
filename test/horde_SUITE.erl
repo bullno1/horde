@@ -3,7 +3,13 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
-all() -> [bootstrap, no_self_join, props].
+all() ->
+	[{group, unstable},
+	 no_self_join,
+	 props].
+
+groups() ->
+	[{unstable, [{repeat_until_any_fail, 50}], [bootstrap]}].
 
 init_per_suite(Config) ->
 	{ok, Apps} = application:ensure_all_started(horde),
