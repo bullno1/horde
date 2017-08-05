@@ -12,7 +12,6 @@
 	combine_policies/1,
 	set_timer_policy/1,
 	with_policy/2,
-	get_timers/0,
 	trigger_timers/0,
 	trigger_timer/1,
 	process_timers/1
@@ -38,8 +37,8 @@
 -type timer_policy_action() :: drop | delay | trigger.
 
 -record(state, {
-	timers = [],
-	policy = delay
+	timers = #{},
+	policy = delay :: timer_policy()
 }).
 
 % API
@@ -88,13 +87,6 @@ with_policy(Policy, Fun) ->
 		set_timer_policy(OldPolicy)
 	end.
 
--spec get_timers() -> [timer()].
-get_timers() ->
-	lists:filter(
-		fun({_, Pid, _}) -> is_process_alive(Pid) end,
-		gen_server:call(?MODULE, get_timers)
-	).
-
 -spec apply_policy(timer_policy(), timer()) -> {timer_policy_action(), timer_policy()}.
 apply_policy(Policy, _Timer) when is_atom(Policy) ->
 	{Policy, Policy};
@@ -113,8 +105,6 @@ init([]) ->
 	process_flag(trap_exit, true),
 	{ok, #state{}}.
 
-handle_call(get_timers, _, #state{timers = Timers} = State) ->
-	{reply, Timers, State};
 handle_call({process_timers, Policy}, _, #state{timers = Timers} = State) ->
 	{reply, ok, State#state{timers = process_timers(Policy, Timers)}};
 handle_call({start_timer, Target, Message}, _, State) ->
@@ -130,13 +120,13 @@ handle_call(
 ) ->
 	{reply, OldPolicy, State#state{policy = NewPolicy}};
 handle_call({cancel_timer, Ref}, _, #state{timers = Timers} = State) ->
-	{reply, ok, State#state{timers = lists:keydelete(Ref, 1, Timers)}}.
+	{reply, ok, State#state{timers = maps:remove(Ref, Timers)}}.
 
 handle_cast(_, State) -> {noreply, State}.
 
 handle_info({'EXIT', Process, _}, #state{timers = Timers} = State) ->
-	Timers2 = lists:filter(
-		fun({_, Pid, _}) -> Pid =/= Process end,
+	Timers2 = maps:filter(
+		fun(_, {_, Pid, _}) -> Pid =/= Process end,
 		Timers
 	),
 	{noreply, State#state{timers = Timers2}};
@@ -145,13 +135,16 @@ handle_info(_, State) ->
 
 % Private
 
-add_timer({_, Process, _} = Timer, #state{timers = Timers, policy = Policy} = State) ->
+add_timer(
+	{Ref, Process, _} = Timer,
+	#state{timers = Timers, policy = Policy} = State
+) ->
 	link(Process),
 	{PolicyAction, NewPolicy} = apply_policy(Policy, Timer),
 	State2 = State#state{policy = NewPolicy},
 	case PolicyAction of
 		drop -> State2;
-		delay -> State2#state{timers = [Timer | Timers]};
+		delay -> State2#state{timers = maps:put(Ref, Timer, Timers)};
 		trigger -> send_timer(Timer), State2
 	end.
 
@@ -171,18 +164,21 @@ apply_policies(Timer, [Policy | Rest], Acc) ->
 	end.
 
 process_timers(Policy, Timers) ->
-	process_timers(Policy, Timers, []).
-
-process_timers(_Policy, [], PendingTimers) ->
-	PendingTimers;
-process_timers(Policy, [Timer | Rest], PendingTimers) ->
-	{PolicyAction, NewPolicy} = apply_policy(Policy, Timer),
-	NewPendingTimers =
-		case PolicyAction of
-			drop -> PendingTimers;
-			delay -> [Timer | PendingTimers];
-			trigger -> send_timer(Timer), PendingTimers
+	{NewTimers, _} = maps:fold(
+		fun(Ref, Timer, {NewTimers, CurrentPolicy}) ->
+			case apply_policy(CurrentPolicy, Timer) of
+				{drop, NewPolicy} ->
+					{NewTimers, NewPolicy};
+				{delay, NewPolicy} ->
+					{maps:put(Ref, Timer, NewTimers), NewPolicy};
+				{trigger, NewPolicy} ->
+					send_timer(Timer),
+					{NewTimers, NewPolicy}
+			end
 		end,
-	process_timers(NewPolicy, Rest, NewPendingTimers).
+		{maps:new(), Policy},
+		Timers
+	),
+	NewTimers.
 
 send_timer({_, Target, Message}) -> Target ! Message.

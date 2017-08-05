@@ -805,26 +805,26 @@ readable_fields() ->
 	[status, transport, ring, successor, predecessor, address, queries].
 
 nodeset(Sets) ->
-	gb_trees:values(
-		lists:foldl(fun nodeset_add_set/2, gb_trees:empty(), Sets)
+	maps:values(
+		lists:foldl(fun nodeset_add_set/2, #{}, Sets)
 	).
 
-nodeset_add_set(Set, Tree) ->
-	lists:foldl(fun nodeset_add_node/2, Tree, Set).
+nodeset_add_set(Set, Nodes) ->
+	lists:foldl(fun nodeset_add_node/2, Nodes, Set).
 
 nodeset_add_node(
 	#{address := #{overlay := Address},
 	  last_seen := Timestamp} = Node,
-	Tree
+	Nodes
 ) ->
 	StrippedNode = maps:remove(source, Node),
-	case gb_trees:lookup(Address, Tree) of
-		{value, #{last_seen := OldTimestamp}} when OldTimestamp < Timestamp ->
-			gb_trees:update(Address, StrippedNode, Tree);
-		none ->
-			gb_trees:insert(Address, StrippedNode, Tree);
+	case maps:find(Address, Nodes) of
+		{ok, #{last_seen := OldTimestamp}} when OldTimestamp < Timestamp ->
+			Nodes#{Address := StrippedNode};
+		error ->
+			Nodes#{Address => StrippedNode};
 		_ ->
-			Tree
+			Nodes
 	end.
 
 format_state(Record) ->
