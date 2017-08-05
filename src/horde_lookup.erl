@@ -191,16 +191,18 @@ send_next_query(
 			send_next_query(State2)
 	end.
 
-%report_history(#state{
-	%address = Address,
-	%max_address = MaxAddress,
-	%history = History
-%}) ->
-	%ForwardHistory = lists:reverse(History),
-	%Distances = [
-		%distance(Peer, Address, MaxAddress)
-		%|| {query, _, Peer} <- ForwardHistory
-	%],
-	%ct:pal("Target: ~p~nHistory: ~p~nDistances: ~p", [
-		%Address, ForwardHistory, Distances
-	%]).
+-ifdef(TEST).
+report_history(#state{
+	address = Address,
+	max_address = MaxAddress,
+	history = History
+}) ->
+	ForwardHistory = lists:reverse(History),
+	Distances = [
+		distance(Peer, Address, MaxAddress)
+		|| {query, _, Peer} <- ForwardHistory
+	],
+	ct:pal("Target: ~p~nHistory: ~p~nDistances: ~p", [
+		Address, ForwardHistory, Distances
+	]).
+-endif.
