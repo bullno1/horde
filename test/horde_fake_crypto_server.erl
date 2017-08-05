@@ -5,13 +5,17 @@
 	start_link/1,
 	stop/0
 ]).
-
 % gen_server
 -export([
 	init/1,
 	handle_call/3,
 	handle_cast/2
 ]).
+-record(state, {
+	rand,
+	keys = sets:new()
+}).
+-define(MAX_KEY, 65535).
 
 % API
 
@@ -21,15 +25,30 @@ stop() -> gen_server:stop(?MODULE).
 
 % gen_server
 
-init(Seed) -> {ok, apply(rand, seed_s, Seed)}.
+init(Seed) -> {ok, #state{rand = apply(rand, seed_s, Seed)}}.
 
 handle_call(max_address, _, State) ->
-	{reply, 65535, State};
-handle_call({reset_seed, Seed}, _, _State) ->
-	{reply, ok, apply(rand, seed_s, Seed)};
+	{reply, ?MAX_KEY, State};
+handle_call({reset_seed, Seed}, _, State) ->
+	{reply, ok, State#state{rand = apply(rand, seed_s, Seed)}};
 handle_call(generate_keypair, _, State) ->
-	{PrivKey, State2} = rand:uniform_s(65535, State),
-	{PubKey, State3} = rand:uniform_s(65535, State2),
-	{reply, {PubKey, PrivKey}, State3}.
+	{KeyPair, State2} = generate_keypair(State),
+	{reply, KeyPair, State2}.
 
 handle_cast(_, State) -> {noreply, State}.
+
+% Private
+
+generate_keypair(#state{rand = Rand, keys = Keys} = State) ->
+	{PrivKey, Rand2} = rand:uniform_s(?MAX_KEY, Rand),
+	KeyPair = {PrivKey - 1, PrivKey},
+	case sets:is_element(KeyPair, Keys) of
+		true ->
+			generate_keypair(State#state{rand = Rand2});
+		false ->
+			State2 = State#state{
+				rand = Rand2,
+				keys = sets:add_element(KeyPair, Keys)
+			},
+			{KeyPair, State2}
+	end.
