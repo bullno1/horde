@@ -58,7 +58,6 @@ postcondition(
 	with_fake_timers(fun() ->
 		#{overlay := NodeAddress} = horde:info(NewNode, address),
 		?assertEqual(standalone, horde:info(NewNode, status)),
-		lists:foreach(fun wait_until_stable/1, Nodes),
 		lists:all(
 			fun(Node) ->
 				?WHEN(Node =/= NewNode andalso horde:info(Node, status) =:= ready,
@@ -66,8 +65,7 @@ postcondition(
 			end,
 			Nodes
 		)
-	end),
-	fake_time:get_timers() =/= [];
+	end);
 postcondition(
 	#state{nodes = Nodes},
 	{call, ?MODULE, node_join, [JoinedNode, _]},
@@ -78,7 +76,6 @@ postcondition(
 			horde:info(JoinedNode, address),
 		?assert(Joined),
 		?assertEqual(ready, horde:info(JoinedNode, status)),
-		lists:foreach(fun wait_until_stable/1, Nodes),
 		lists:all(
 			fun(Node) ->
 				Queries = horde:info(Node, queries),
@@ -129,18 +126,6 @@ node_join(Node, BootstrapNode) ->
 		#{transport := TransportAddress} = horde:info(BootstrapNode, address),
 		horde:join(Node, [{transport, TransportAddress}], 300)
 	end).
-
-wait_until_stable(Node) ->
-	wait_until(fun() -> maps:size(horde:info(Node, queries)) =:= 0 end).
-
-wait_until(Fun) ->
-	case Fun() of
-		true -> ok;
-		false ->
-			fake_time:process_timers(fun check_query_timeout/1),
-			timer:sleep(10),
-			wait_until(Fun)
-	end.
 
 node_leave(Node) ->
 	NodeAddress = horde:info(Node, address),
