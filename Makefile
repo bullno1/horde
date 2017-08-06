@@ -27,5 +27,5 @@ include erlang.mk
 all:: rebar.config
 check:: elvis
 
-coverall:
+coverall: $(shell ls -1rt `find logs -type f -name \*.coverdata 2>/dev/null` | tail -n1)
 	$(gen_verbose) erl -noshell -pa ebin deps/*/ebin -eval 'ecoveralls:travis_ci("$?"), init:stop()'
