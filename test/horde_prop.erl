@@ -136,6 +136,8 @@ postcondition(
 	Address
 ) ->
 	with_fake_timers(fun() ->
+		% Only ping with bootstrap node to leave the stale entry in other node's
+		% caches
 		ok =:= ?assertEqual(pang, horde:ping(BootstrapNode, {compound, Address}))
 	end);
 postcondition(_State, {call, _Mod, _Fun, _Args}, _Res) ->
