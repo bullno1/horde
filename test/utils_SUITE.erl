@@ -62,4 +62,5 @@ address(_Config) ->
 	ok.
 
 horde_address_spec(_Config) ->
-	?assertEqual([], proper:check_specs(horde_utils, [{to_file, user}])).
+	?assert(proper:check_spec({horde_utils, is_address_between, 3}, [{to_file, user}])),
+	?assert(proper:check_spec({horde_utils, is_address_between, 5}, [{to_file, user}])).

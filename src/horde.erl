@@ -37,6 +37,7 @@
 	message_header/0,
 	message_body/0
 ]).
+-include("horde_utils.hrl").
 -ifdef(TEST).
 -define(TIME, fake_time).
 -else.
@@ -257,7 +258,7 @@ handle_call({query_info, QueryRef}, _From, #state{queries = Queries} = State) ->
 	Result =
 		case maps:find(QueryRef, Queries) of
 			{ok, Query} ->
-				record_to_map(record_info(fields, query), Query);
+				?RECORD_TO_MAP(query, Query);
 			error ->
 				undefined
 		end,
@@ -771,12 +772,7 @@ maybe_remove_node(
 	).
 
 extract_info(queries, #state{queries = Queries}) ->
-	maps:map(
-		fun(_, V) ->
-			record_to_map(record_info(fields, query), V)
-		end,
-		Queries
-	);
+	maps:map(fun(_, V) -> ?RECORD_TO_MAP(query, V) end, Queries);
 extract_info(status, #state{status = Status}) ->
 	case Status of
 		ready -> ready;
@@ -790,7 +786,7 @@ extract_info(
 	TransportAddress = horde_transport:info(Transport, address),
 	#{overlay => OverlayAddress, transport => TransportAddress};
 extract_info(What, State) ->
-	maps:get(What, record_to_map(record_info(fields, state), State)).
+	maps:get(What, ?RECORD_TO_MAP(state, State)).
 
 nodeset(Sets) ->
 	maps:values(
@@ -814,9 +810,6 @@ nodeset_add_node(
 		_ ->
 			Nodes
 	end.
-
-record_to_map(Fields, Record) ->
-	maps:from_list(lists:zip(Fields, tl(tuple_to_list(Record)))).
 
 undefined_if_removed(Address, #{address := Address}) -> undefined;
 undefined_if_removed(_, Node) -> Node.

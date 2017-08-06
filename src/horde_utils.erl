@@ -1,6 +1,7 @@
 -module(horde_utils).
 -export([
 	maybe_reply/3,
+	record_to_map/2,
 	is_address_between/3,
 	is_address_between/5
 ]).
@@ -36,3 +37,7 @@ maybe_reply(Module, {async, {Pid, Tag}}, Msg) ->
 maybe_reply(_Module, {sync, Client}, Msg) ->
 	gen_server:reply(Client, Msg),
 	ok.
+
+-spec record_to_map([atom()], tuple()) -> #{}.
+record_to_map(Fields, Record) ->
+	maps:from_list(lists:zip(Fields, tl(tuple_to_list(Record)))).

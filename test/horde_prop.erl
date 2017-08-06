@@ -226,11 +226,3 @@ on_down(Pid, Fun) ->
 			{'DOWN', MonitorRef, process, Pid, _} -> Fun()
 		end
 	end).
-
-format_state(State) ->
-	maps:from_list(
-		lists:zip(
-			record_info(fields, state),
-			tl(tuple_to_list(State))
-		)
-	).
