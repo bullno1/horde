@@ -2,5 +2,7 @@ language: erlang
 script:
   - make
   - make check
+after_success:
+  - make coverall
 otp_release:
   - 20.0

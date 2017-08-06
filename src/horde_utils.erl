@@ -38,6 +38,6 @@ maybe_reply(_Module, {sync, Client}, Msg) ->
 	gen_server:reply(Client, Msg),
 	ok.
 
--spec record_to_map([atom()], tuple()) -> #{}.
+-spec record_to_map([atom()], tuple()) -> map().
 record_to_map(Fields, Record) ->
 	maps:from_list(lists:zip(Fields, tl(tuple_to_list(Record)))).
