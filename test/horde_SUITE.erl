@@ -42,7 +42,7 @@ props(_Config) ->
 bootstrap() -> [{timetrap, 20000}].
 
 bootstrap(_Config) ->
-	NumNodes = 128,
+	NumNodes = 64,
 	Nodes = lists:map(
 		fun(_) ->
 			horde_test_utils:create_node()
