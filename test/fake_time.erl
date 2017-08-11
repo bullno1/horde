@@ -11,6 +11,7 @@
 	apply_policy/2,
 	combine_policies/1,
 	set_timer_policy/1,
+	get_timers/0,
 	with_policy/2,
 	trigger_timers/0,
 	trigger_timer/1,
@@ -104,12 +105,17 @@ apply_policy({PolicyFun, PolicyState}, Timer) when is_function(PolicyFun, 2) ->
 -spec combine_policies([timer_policy()]) -> timer_policy().
 combine_policies(Policies) -> {fun apply_policies/2, Policies}.
 
+-spec get_timers() -> [timer()].
+get_timers() -> gen_server:call(?MODULE, get_timers).
+
 % gen_server
 
 init([]) ->
 	process_flag(trap_exit, true),
 	{ok, #state{}}.
 
+handle_call(get_timers, _, #state{timers = Timers} = State) ->
+	{reply, maps:values(Timers), State};
 handle_call({process_timers, Policy}, _, #state{timers = Timers} = State) ->
 	{NewTimers, _NewPolicy} = process_timers(Policy, Timers),
 	{reply, ok, State#state{timers = NewTimers}};

@@ -8,6 +8,7 @@
 	update/3,
 	insert/3,
 	remove/2,
+	fold/3,
 	to_list/1,
 	size/1
 ]).
@@ -62,6 +63,10 @@ insert(Key, Value, Ring) ->
 remove(Key, Ring) ->
 	modify_trees(Key, fun(K, Tree) -> gb_trees:delete_any(K, Tree) end, Ring).
 
+-spec fold(fun((Key, Value, Acc) -> Acc), Acc, ring(Key, Value)) -> Acc.
+fold(FoldFun, Acc, #ring{forward = Forward}) ->
+	fold1(FoldFun, Acc, gb_trees:next(gb_trees:iterator(Forward))).
+
 -spec to_list(ring(Key, Value)) -> [{Key, Value}].
 to_list(#ring{forward = Forward}) ->
 	gb_trees:to_list(Forward).
@@ -104,3 +109,8 @@ modify_trees(
 		forward = Fun(Key, ForwardTree),
 		reverse = Fun(RevFun(Key), ReverseTree)
 	}.
+
+fold1(_FoldFun, Acc, none) ->
+	Acc;
+fold1(FoldFun, Acc, {Key, Value, Iterator}) ->
+	fold1(FoldFun, FoldFun(Key, Value, Acc), gb_trees:next(Iterator)).

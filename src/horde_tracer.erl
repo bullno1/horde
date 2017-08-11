@@ -1,25 +1,50 @@
 -module(horde_tracer).
--export([new/2, handle_event/2, noop/0]).
+-behaviour(gen_server).
+% API
+-export([
+	new/0,
+	noop/0,
+	handle_event/2,
+	collect_events/1
+]).
+% gen_server
+-export([
+	init/1,
+	handle_call/3,
+	handle_cast/2
+]).
 -export_type([tracer/0]).
 
--opaque tracer() :: {module(), term()}.
+-opaque tracer() :: pid() | noop.
 
--callback init(Opts) -> State when
-	  Opts :: term(),
-	  State :: term().
+% API
 
--callback handle_event(Event, State) -> NewState when
-	  Event :: term(),
-	  State :: term(),
-	  NewState :: term().
+-spec new() -> tracer().
+new() ->
+	{ok, Tracer} = gen_server:start_link(?MODULE, [], []),
+	Tracer.
 
--spec new(module(), term()) -> tracer().
-new(Module, Opts) -> {Module, Module:init(Opts)}.
-
--spec handle_event(term(), tracer()) -> tracer().
-handle_event(Event, {Module, State}) ->
-	NewState = Module:handle_event(Event, State),
-	{Module, NewState}.
+-spec handle_event(term(), tracer()) -> ok.
+handle_event(_Event, noop) ->
+	ok;
+handle_event(Event, Pid) ->
+	gen_server:cast(Pid, {handle_event, Event}).
 
 -spec noop() -> tracer().
-noop() -> new(horde_noop_tracer, []).
+noop() -> noop.
+
+-spec collect_events(tracer()) -> list().
+collect_events(noop) ->
+	[];
+collect_events(Pid) ->
+	gen_server:call(Pid, collect_events).
+
+% gen_server
+
+init([]) -> {ok, []}.
+
+handle_call(collect_events, _From, Events) ->
+	{stop, normal, lists:reverse(Events), []}.
+
+handle_cast({handle_event, Event}, Events) ->
+	{noreply, [Event | Events]}.

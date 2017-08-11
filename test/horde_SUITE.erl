@@ -33,7 +33,7 @@ end_per_testcase(_Testcase, _Config) ->
 no_self_join(_Config) ->
 	Node = horde_test_utils:create_node(),
 	#{transport := TransportAddress} = horde:info(Node, address),
-	?assertEqual(false, horde:join(Node, [{transport, TransportAddress}], infinity)),
+	?assertEqual(false, horde:join(Node, [{transport, TransportAddress}])),
 	horde:stop(Node).
 
 props(_Config) ->
@@ -56,13 +56,17 @@ bootstrap(_Config) ->
 	[BootstrapNode | _] = Nodes,
 	#{transport := BootstrapAddress} = horde:info(BootstrapNode, address),
 	BootstrapNodes = [{transport, BootstrapAddress}],
-	lists:foreach(
-		fun(Node) -> horde:join_async(Node, BootstrapNodes) end,
-		tl(Nodes)
-	),
-	_ = [
-		?assertEqual(true, horde:wait_join(Node, infinity))
+	Joins = [
+		{Node, spawn_monitor(fun() -> horde:join(Node, BootstrapNodes) end)}
 		|| Node <- tl(Nodes)
+	],
+	_ = [
+		receive
+			{'DOWN', MonitorRef, _, _, Reason} ->
+				?assertEqual(normal, Reason),
+				?assertEqual(joined, horde:info(Node, status))
+		end
+		|| {Node, {_, MonitorRef}} <- Joins
 	],
 	% A node's ring must not contains itself
 	lists:foreach(
@@ -73,14 +77,14 @@ bootstrap(_Config) ->
 		end,
 		Nodes
 	),
-	_ = [?assertEqual(ready, horde:info(Node, status)) || Node <- Nodes],
+	_ = [?assertEqual(joined, horde:info(Node, status)) || Node <- Nodes],
 	% All nodes must have a correct local view of the swarm
 	MaxAddress = horde_crypto:info(horde_crypto:default(), max_address),
 	FullRing =
 		lists:foldl(
 			fun(Node, Acc) ->
-				#{overlay := OverlayAddress} = horde:info(Node, address),
-				horde_ring:insert(OverlayAddress, Node, Acc)
+				CompoundAddress = #{overlay := OverlayAddress} = horde:info(Node, address),
+				horde_ring:insert(OverlayAddress, CompoundAddress, Acc)
 			end,
 			horde_ring:new(fun(Addr) -> MaxAddress - Addr end),
 			Nodes
@@ -90,10 +94,8 @@ bootstrap(_Config) ->
 			Successor = #{address := SuccessorAddress} = horde:info(Node, successor),
 			Predecessor = #{address := PredecessorAddress} = horde:info(Node, predecessor),
 			#{overlay := OverlayAddress} = horde:info(Node, address),
-			[SuccessorNode] = horde_ring:successors(OverlayAddress, 1, FullRing),
-			[PredecessorNode] = horde_ring:predecessors(OverlayAddress, 1, FullRing),
-			?assertEqual(SuccessorAddress, horde:info(SuccessorNode, address)),
-			?assertEqual(PredecessorAddress, horde:info(PredecessorNode, address)),
+			?assertEqual({OverlayAddress, [SuccessorAddress]}, {OverlayAddress, horde_ring:successors(OverlayAddress, 1, FullRing)}),
+			?assertEqual({OverlayAddress, [PredecessorAddress]}, {OverlayAddress, horde_ring:predecessors(OverlayAddress, 1, FullRing)}),
 
 			% Neighbour pointers must be kept up-to-date
 			NodeRing = horde:info(Node, ring),
@@ -107,10 +109,6 @@ bootstrap(_Config) ->
 		Nodes
 	),
 	% Any node can lookup other nodes
-	Tracer = horde_tracer:new(horde_lookup_tracer, #{
-		report_on_success => false,
-		report_on_failure => true
-	}),
 	lists:foreach(
 		fun(Node) ->
 			lists:foreach(
@@ -119,7 +117,9 @@ bootstrap(_Config) ->
 						= horde:info(OtherNode, address),
 					ok =:= ?assertEqual(
 						{ok, TransportAddress},
-						horde:lookup(Node, OverlayAddress, Tracer)
+						horde_test_utils:lookup_traced(
+							Node, OverlayAddress, false, true
+						)
 					)
 				end,
 				Nodes

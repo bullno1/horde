@@ -88,14 +88,10 @@ postcondition(
 	with_fake_timers(fun() ->
 		#{overlay := NodeAddress} = horde:info(NewNode, address),
 		?assertEqual(standalone, horde:info(NewNode, status)),
-		Tracer = horde_lookup_tracer:new(#{
-			report_on_success => true,
-			report_on_failure => false
-		}),
 		lists:all(
 			fun(Node) ->
-				?WHEN(Node =/= NewNode andalso horde:info(Node, status) =:= ready,
-					ok =:= ?assertEqual(error, horde:lookup(Node, NodeAddress, Tracer)))
+				?WHEN(Node =/= NewNode andalso horde:info(Node, status) =:= joined,
+					ok =:= ?assertEqual(error, horde_test_utils:lookup_traced(Node, NodeAddress, true, false)))
 			end,
 			Nodes
 		)
@@ -105,27 +101,25 @@ postcondition(
 	{call, ?MODULE, node_join, [JoinedNode, _]},
 	Joined
 ) ->
+	?assert(Joined),
 	with_fake_timers(fun() ->
 		#{transport := TransportAddress, overlay := OverlayAddress} =
 			CompoundAddress = horde:info(JoinedNode, address),
-		?assert(Joined),
-		?assertEqual(ready, horde:info(JoinedNode, status)),
-		Tracer = horde_lookup_tracer:new(#{
-			report_on_success => false,
-			report_on_failure => true
-		}),
+		lists:foreach(fun wait_until_stable/1, Nodes),
+		?assertEqual({OverlayAddress, joined}, {OverlayAddress, horde:info(JoinedNode, status)}),
 		lists:all(
 			fun(Node) ->
 				Queries = horde:info(Node, queries),
-				?WHEN(horde:info(Node, status) =:= ready,
+				?WHEN(horde:info(Node, status) =:= joined,
 					ok =:= ?assertEqual(
 						{Node, Queries, {ok, TransportAddress}},
-						{Node, Queries, horde:lookup(Node, OverlayAddress, Tracer)}
-					))
+						{Node, Queries, horde_test_utils:lookup_traced(Node, OverlayAddress, false, true)}
+					)
 					andalso
 					ok =:= ?assertEqual(
 						pong, horde:ping(Node, {compound, CompoundAddress})
 					)
+				)
 			end,
 			Nodes
 		)
@@ -175,7 +169,7 @@ new_node() -> horde_test_utils:create_node().
 node_join(Node, BootstrapNode) ->
 	with_fake_timers(fun() ->
 		#{transport := TransportAddress} = horde:info(BootstrapNode, address),
-		horde:join(Node, [{transport, TransportAddress}], 5000)
+		horde:join(Node, [{transport, TransportAddress}])
 	end).
 
 node_leave(Node) ->
@@ -226,5 +220,13 @@ on_down(Pid, Fun) ->
 		MonitorRef = monitor(process, Pid),
 		receive
 			{'DOWN', MonitorRef, process, Pid, _} -> Fun()
+		end
+	end).
+
+wait_until_stable(Node) ->
+	horde:wait(Node, fun(_) ->
+		case maps:size(horde:info(Node, queries)) =:= 0 of
+			true -> {stop, ok};
+			false -> wait
 		end
 	end).

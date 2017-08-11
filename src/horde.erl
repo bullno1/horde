@@ -4,19 +4,21 @@
 -export([
 	start_link/1,
 	start_link/2,
+	watch/1,
+	unwatch/2,
 	lookup/2,
 	lookup/3,
 	info/2,
-	join/3,
-	join_async/2,
-	wait_join/2,
+	join/2,
+	wait_join/1,
+	wait/2,
 	ping/2,
 	stop/1
 ]).
 % Low-level API
 -export([
+	send_query/3,
 	send_query_async/3,
-	send_query_sync/3,
 	query_info/2
 ]).
 % gen_server
@@ -74,6 +76,7 @@
 	max_address := overlay_address(),
 	transport := {module(), term()},
 	ring_check_interval => non_neg_integer(),
+	cache_period => non_neg_integer(),
 	query_timeout => pos_integer(),
 	num_retries => non_neg_integer(),
 	retry_delay => non_neg_integer(),
@@ -82,6 +85,10 @@
 	num_neighbours => pos_integer(),
 	min_slice_size => pos_integer()
 }.
+-type lookup_opts() :: #{
+	resolvers => [endpoint()],
+	tracer => horde_tracer:tracer()
+}.
 -type query_info() :: #{
 	sender := horde_utils:reply_to(),
 	destination := endpoint(),
@@ -89,7 +96,7 @@
 	num_retries := non_neg_integer(),
 	timer := reference() | undefined
 }.
--type join_status() :: standalone | joining | ready.
+-type wait_cond(T) :: fun((ref()) -> {stop, T} | continue).
 
 -record(query, {
 	sender :: horde_utils:reply_to(),
@@ -102,14 +109,14 @@
 	address :: overlay_address(),
 	max_address :: overlay_address(),
 	transport :: horde_transport:ref(),
-	status = standalone :: standalone | {joining, reference()} | joining2 | ready,
-	join_waiters = [] :: list(),
 	queries = #{} :: #{reference() => #query{}},
+	watchers = [] :: [{reference(), pid()}],
 	successor :: node_info() | undefined,
 	predecessor :: node_info() | undefined,
 	ring :: horde_ring:ring(overlay_address(), node_info()),
 	ring_check_timer :: reference(),
 	ring_check_interval :: non_neg_integer(),
+	cache_period :: non_neg_integer(),
 	num_nodes_probed = 0 :: non_neg_integer(),
 	num_nodes_failed = 0 :: non_neg_integer(),
 	query_timeout :: pos_integer(),
@@ -129,46 +136,60 @@ start_link(Opts) -> gen_server:start_link(?MODULE, Opts, []).
 -spec start_link(name(), opts()) -> {ok, pid()} | {error, any()}.
 start_link(Name, Opts) -> gen_server:start_link(Name, ?MODULE, Opts, []).
 
+-spec watch(ref()) -> reference().
+watch(Ref) -> gen_server:call(Ref, watch).
+
+-spec unwatch(ref(), reference()) -> ok.
+unwatch(Ref, MonitorRef) -> gen_server:call(Ref, {unwatch, MonitorRef}).
+
 -spec lookup(ref(), overlay_address())
 	-> {ok, horde_transport:address()} | error.
-lookup(Ref, Address) -> lookup(Ref, Address, horde_tracer:noop()).
+lookup(Ref, Address) -> lookup(Ref, Address, #{}).
 
--spec lookup(ref(), overlay_address(), horde_tracer:tracer())
+-spec lookup(ref(), overlay_address(), lookup_opts())
 	-> {ok, horde_transport:address()} | error.
-lookup(Ref, Address, Tracer) ->
-	gen_server:call(Ref, {lookup, Address, Tracer}, infinity).
+lookup(Ref, Address, LookupOpts) ->
+	gen_server:call(Ref, {lookup, Address, LookupOpts}, infinity).
 
 -spec info
-	(ref(), status) -> join_status();
+	(ref(), status) -> standalone | joining | joined;
 	(ref(), ring) -> horde_ring:ring(overlay_address(), node_info());
 	(ref(), queries) -> #{reference() => query_info()};
 	(ref(), successor) -> node_info() | undefined;
 	(ref(), predecessor) -> node_info() | undefined;
 	(ref(), address) -> compound_address();
 	(ref(), transport) -> horde_transport:ref().
-info(Ref, Info) -> gen_server:call(Ref, {info, Info}).
+info(Ref, Info) ->
+	gen_server:call(Ref, {info, Info}).
 
 -spec query_info(ref(), reference()) -> query_info() | undefined.
 query_info(Ref, QueryRef) -> gen_server:call(Ref,  {query_info, QueryRef}).
 
--spec join(ref(), [endpoint()], timeout()) -> boolean().
-join(Ref, BootstrapNodes, Timeout) ->
-	join_async(Ref, BootstrapNodes),
-	wait_join(Ref, Timeout).
-
--spec join_async(ref(), [endpoint()]) -> ok.
-join_async(Ref, BootstrapNodes) when length(BootstrapNodes) > 0 ->
-	gen_server:cast(Ref, {join, BootstrapNodes}).
-
--spec wait_join(ref(), timeout()) -> boolean().
-wait_join(Ref, Timeout) ->
-	gen_server:call(Ref, wait_join, Timeout).
+-spec join(ref(), [endpoint()]) -> boolean().
+join(Ref, BootstrapNodes) ->
+	OwnAddress = overlay_address(info(Ref, address)),
+	_ = lookup(Ref, OwnAddress, #{resolvers => BootstrapNodes}),
+	wait_join(Ref).
 
 -spec ping(ref(), endpoint()) -> pong | pang.
 ping(Ref, Endpoint) ->
-	case send_query_sync(Ref, Endpoint, ping) of
+	case send_query(Ref, Endpoint, ping) of
 		{reply, _} -> pong;
 		noreply -> pang
+	end.
+
+-spec wait_join(ref()) -> boolean().
+wait_join(Ref) -> wait(Ref, fun wait_join_cond/1).
+
+-spec wait(ref(), wait_cond(T)) -> T.
+wait(Ref, WaitCond) ->
+	WatchRef = watch(Ref),
+	MonitorRef = monitor(process, Ref),
+	try
+		wait_loop(Ref, WatchRef, MonitorRef, WaitCond)
+	after
+		demonitor(MonitorRef, [flush]),
+		catch unwatch(Ref, WatchRef)
 	end.
 
 -spec send_query_async(ref(), endpoint(), message_body()) -> reference().
@@ -177,9 +198,9 @@ send_query_async(Ref, Endpoint, Message) ->
 	gen_server:cast(Ref, {send_query, QueryRef, self(), Endpoint, Message}),
 	QueryRef.
 
--spec send_query_sync(ref(), endpoint(), message_body()) ->
+-spec send_query(ref(), endpoint(), message_body()) ->
 	{reply, message_body()} | noreply.
-send_query_sync(Ref, Endpoint, Message) ->
+send_query(Ref, Endpoint, Message) ->
 	gen_server:call(Ref, {send_query, Endpoint, Message}, infinity).
 
 -spec stop(ref()) -> ok.
@@ -199,15 +220,16 @@ init(#{
 		{ok, Transport} ->
 			horde_transport:recv_async(Transport),
 			RingCheckInterval = maps:get(ring_check_interval, Opts, 60000),
+			CachePeriod = maps:get(cache_period, Opts, 120000),
 			RingCheckTimer = ?TIME:start_timer(RingCheckInterval, self(), check_ring),
-			RevFun = fun(Addr) when is_integer(Addr) -> MaxAddress - Addr end,
 			State = #state{
 				address = OverlayAddress,
 				max_address = MaxAddress,
 				transport = Transport,
-				ring = horde_ring:new(RevFun),
+				ring = horde_ring:new(rev_fun(MaxAddress)),
 				ring_check_timer = RingCheckTimer,
 				ring_check_interval = RingCheckInterval,
+				cache_period = CachePeriod,
 				query_timeout = maps:get(query_timeout, Opts, 5000),
 				num_retries = maps:get(num_retries, Opts, 3),
 				retry_delay = maps:get(retry_delay, Opts, 500),
@@ -222,35 +244,38 @@ init(#{
 	end.
 
 handle_call(
-	wait_join, From,
-	#state{status = Status, join_waiters = Waiters} = State
-) ->
-	case Status of
-		standalone ->
-			{reply, false, State};
-		ready ->
-			{reply, true, State};
-		_ ->
-			{noreply, State#state{join_waiters = [From | Waiters]}}
-	end;
-handle_call(
-	{lookup, Address, Tracer}, From,
+	{lookup, Address, Opts}, From,
 	#state{
 		address = OwnAddress,
 		ring = Ring,
 		num_parallel_queries = NumParallelQueries,
-		num_neighbours = NumNeighbours
+		num_neighbours = NumNeighbours,
+		max_address = MaxAddress
 	} = State
 ) ->
-	Peers = nodeset([
+	BestPeers = nodeset([
 		horde_ring:successors(Address, 1, Ring),
 		horde_ring:predecessors(Address, NumParallelQueries - 1, Ring),
 		horde_ring:successors(OwnAddress, NumNeighbours, Ring),
 		horde_ring:predecessors(OwnAddress, NumNeighbours, Ring)
 	]),
-	EndpointsOfPeers = [{compound, Addr} || #{address := Addr} <- Peers],
-	_ = start_lookup(Address, EndpointsOfPeers, Tracer, {sync, From}, State),
+	LookupArgs = #{
+		horde => self(),
+		sender => {sync, From},
+		address => Address,
+		max_address => MaxAddress,
+		num_parallel_queries => NumParallelQueries,
+		resolvers => [{compound, Addr} || #{address := Addr} <- BestPeers],
+		tracer => horde_tracer:noop()
+	},
+	_ = horde_lookup:start_link(maps:merge(LookupArgs, Opts)),
 	{noreply, State};
+handle_call(watch, {Pid, _}, #state{watchers = Watchers} = State) ->
+	MonitorRef = erlang:monitor(process, Pid),
+	{reply, MonitorRef, State#state{watchers = [{MonitorRef, Pid} | Watchers]}};
+handle_call({unwatch, Ref}, _From, #state{watchers = Watchers} = State) ->
+	erlang:demonitor(Ref, [flush]),
+	{reply, ok, State#state{watchers = lists:keydelete(Ref, 1, Watchers)}};
 handle_call({send_query, Endpoint, Message}, {_Pid, QueryRef} = From, State) ->
 	State2 = start_query(QueryRef, {sync, From}, Endpoint, Message, State),
 	{noreply, State2};
@@ -266,31 +291,46 @@ handle_call({query_info, QueryRef}, _From, #state{queries = Queries} = State) ->
 handle_call({info, What}, _From, State) ->
 	{reply, extract_info(What, State), State}.
 
-handle_cast(
-	{join, BootstrapNodes},
-	#state{address = OwnAddress, status = standalone} = State
-) ->
-	Tracer = horde_tracer:noop(),
-	case start_lookup(OwnAddress, BootstrapNodes, Tracer, none, State) of
-		{ok, Pid} ->
-			MonitorRef = erlang:monitor(process, Pid),
-			{noreply, State#state{status = {joining, MonitorRef}}};
-		{error, Reason} ->
-			error_logger:error_report([
-				"Error while trying to join",
-				{module, ?MODULE},
-				{error, Reason}
-			]),
-			{noreply, State}
-	end;
-handle_cast({join, _}, State) ->
-	{noreply, State};
 handle_cast({send_query, Ref, Sender, Endpoint, Message}, State) ->
 	State2 = start_query(Ref, {async, {Sender, Ref}}, Endpoint, Message, State),
 	{noreply, State2}.
 
+handle_info(
+	{'DOWN', MonitorRef, process, _, _},
+	#state{watchers = Watchers} = State
+) ->
+	{noreply, State#state{watchers = lists:keydelete(MonitorRef, 1, Watchers)}};
+handle_info(
+	{timeout, RingCheckTimer, check_ring},
+	#state{
+		ring_check_timer = RingCheckTimer,
+		ring_check_interval = RingCheckInterval
+	} = State
+) ->
+	State2 = check_ring(State),
+	RingCheckTimer2 = ?TIME:start_timer(RingCheckInterval, self(), check_ring),
+	{noreply, State2#state{ring_check_timer = RingCheckTimer2}};
+handle_info({timeout, _, {query_timeout, Id}} = Event, State) ->
+	State2 = dispatch_query_event(Event, fun handle_query_error/4, Id, State),
+	{noreply, State2};
+handle_info(
+	{horde_transport, Transport, {message, Header, Body}},
+	#state{transport = Transport} = State
+) ->
+	State2 = handle_overlay_message(Header, Body, State),
+	horde_transport:recv_async(Transport),
+	{noreply, State2};
+handle_info(
+	{horde_transport, Transport, {transport_error, _, Id} = Error},
+	#state{transport = Transport} = State
+) ->
+	State2 = dispatch_query_event(Error, fun handle_query_error/4, Id, State),
+	{noreply, State2};
 handle_info(Msg, State) ->
-	{noreply, check_join_status(handle_info1(Msg, State))}.
+	error_logger:warning_report([
+		"Unexpected message", {module, ?MODULE}, {message, Msg}
+	]),
+	{noreply, State}.
 
 terminate(_Reason, #state{transport = Transport}) ->
 	_ = horde_transport:close(Transport),
@@ -298,26 +338,28 @@ terminate(_Reason, #state{transport = Transport}) ->
 
 % Private
 
-start_lookup(_, [], _Tracer, ReplyTo, _State) ->
-	horde_utils:maybe_reply(?MODULE, ReplyTo, error),
-	{error, no_resolver};
-start_lookup(
-	Address, Resolvers, Tracer, ReplyTo,
-	#state{
-		num_parallel_queries = NumParallelQueries,
-		max_address = MaxAddress
-	}
-) ->
-	LookupArgs = #{
-		horde => self(),
-		sender => ReplyTo,
-		address => Address,
-		resolvers => Resolvers,
-		max_address => MaxAddress,
-		num_parallel_queries => NumParallelQueries,
-		tracer => Tracer
-	},
-	horde_lookup:start_link(LookupArgs).
+rev_fun(MaxAddress) ->
+	fun(Addr) when is_integer(Addr) -> MaxAddress - Addr end.
+
+wait_loop(Ref, WatchRef, MonitorRef, WaitCond) ->
+	case WaitCond(Ref) of
+		{stop, Result} ->
+			Result;
+		wait ->
+			receive
+				{?MODULE, WatchRef, _} ->
+					wait_loop(Ref, WatchRef, MonitorRef, WaitCond);
+				{'DOWN', MonitorRef, process, _, Reason} ->
+					exit(Reason)
+			end
+	end.
+
+wait_join_cond(Ref) ->
+	case info(Ref, status) of
+		standalone -> {stop, false};
+		joining -> wait;
+		joined -> {stop, true}
+	end.
 
 maybe_ping(Endpoint, #state{queries = Queries} = State) ->
 	IsQueryingAddress = lists:any(
@@ -369,9 +411,13 @@ handle_overlay_message1(
 	} = State
 ) ->
 	Nodes = case horde_ring:lookup(TargetAddress, Ring) of
-		% If node is known, reply with info and own immediate predecessor
+		% If node is known, reply with info and neighbours
 		{value, Node} ->
-			nodeset([[Node], set_of(OwnPredecessor)]);
+			nodeset([
+				[Node],
+				horde_ring:successors(TargetAddress, 1, Ring),
+				horde_ring:predecessors(TargetAddress, 1, Ring)
+			]);
 		% If node is not known, reply with a closer immediate neighbour and
 		% a number of "next best hops" around the target.
 		none ->
@@ -542,6 +588,7 @@ add_node(
 ) ->
 	State;
 add_node(Node, #state{ring = Ring} = State) ->
+	notify_watchers({found_node, Node}, State),
 	State2 = State#state{ring = maybe_update_ring(Node, Ring)},
 	State3 = maybe_update_neighbour(predecessor, Node, State2),
 	maybe_update_neighbour(successor, Node, State3).
@@ -595,10 +642,10 @@ maybe_update_neighbour(
 	predecessor, Node,
 	#state{address = OwnAddress, predecessor = Predecessor} = State
 ) ->
-	case horde_utils:is_address_between(
+	case is_better_predecessor(
 		overlay_address(Node),
-		overlay_address(Predecessor),
-		OwnAddress
+		OwnAddress,
+		overlay_address(Predecessor)
 	) of
 		true -> maybe_set_neighbour(predecessor, Node, State);
 		false -> State
@@ -607,7 +654,7 @@ maybe_update_neighbour(
 	successor, Node,
 	#state{address = OwnAddress, successor = Successor} = State
 ) ->
-	case horde_utils:is_address_between(
+	case is_better_successor(
 		overlay_address(Node),
 		OwnAddress,
 		overlay_address(Successor)
@@ -616,122 +663,18 @@ maybe_update_neighbour(
 		false -> State
 	end.
 
+is_better_successor(Address, OwnAddress, SuccessorAddress) ->
+	horde_utils:is_address_between(Address, OwnAddress, SuccessorAddress).
+
+is_better_predecessor(Address, OwnAddress, PredecessorAddress) ->
+	horde_utils:is_address_between(Address, PredecessorAddress, OwnAddress).
+
 maybe_set_neighbour(_, #{address := Address, source := indirect}, State) ->
 	maybe_ping({compound, Address}, State);
 maybe_set_neighbour(successor, #{source := direct} = Node, State) ->
 	State#state{successor = Node};
 maybe_set_neighbour(predecessor, #{source := direct} = Node, State) ->
 	State#state{predecessor = Node}.
-
-handle_info1(
-	{'DOWN', BootstrapRef, process, _, normal},
-	#state{status = {joining, BootstrapRef}} = State
-) ->
-	State#state{status = joining2};
-handle_info1(
-	{timeout, RingCheckTimer, check_ring},
-	#state{
-		ring_check_timer = RingCheckTimer,
-		ring_check_interval = RingCheckInterval
-	} = State
-) ->
-	State2 = check_ring(State),
-	NewRingCheckTimer = ?TIME:start_timer(RingCheckInterval, self(), check_ring),
-	State2#state{ring_check_timer = NewRingCheckTimer};
-handle_info1({timeout, _, {query_timeout, Id}} = Event, State) ->
-	dispatch_query_event(Event, fun handle_query_error/4, Id, State);
-handle_info1(
-	{horde_transport, Transport, {message, Header, Body}},
-	#state{transport = Transport} = State
-) ->
-	State2 = handle_overlay_message(Header, Body, State),
-	horde_transport:recv_async(Transport),
-	State2;
-handle_info1(
-	{horde_transport, Transport, {transport_error, _, Id} = Error},
-	#state{transport = Transport} = State
-) ->
-	dispatch_query_event(Error, fun handle_query_error/4, Id, State);
-handle_info1(Msg, State) ->
-	error_logger:warning_report([
-		"Unexpected message", {module, ?MODULE}, {message, Msg}
-	]),
-	State.
-
-check_join_status(#state{status = OldStatus} = State) ->
-	NewStatus = join_status(State),
-	case NewStatus =/= OldStatus of
-		true ->
-			notify_join_status(State#state{status = NewStatus});
-		false ->
-			State
-	end.
-
-join_status(
-	#state{
-		status = standalone,
-		successor = Successor,
-		predecessor = Predecessor
-	}
-) when Successor =/= undefined, Predecessor =/= undefined ->
-	% Passive join
-	ready;
-join_status(
-	#state{
-		status = joining2 = Status,
-		queries = Queries,
-		successor = Successor,
-		predecessor = Predecessor
-	}
-) ->
-	% Active join
-	NumPings = lists:foldl(
-		fun(#query{message = Message}, Acc) ->
-			case Message of
-				ping -> Acc + 1;
-				_ -> Acc
-			end
-		end,
-		0,
-		maps:values(Queries)
-	),
-	FinishedBootstrapping = NumPings =:= 0,
-	FoundNeighbours = Successor =/= undefined andalso Predecessor =/= undefined,
-	if
-		FinishedBootstrapping and FoundNeighbours ->
-			ready;
-		FinishedBootstrapping and not FoundNeighbours ->
-			standalone;
-		true ->
-			Status
-	end;
-join_status(
-	#state{
-		status = ready = Status,
-		ring = Ring,
-		queries = Queries,
-		successor = Successor,
-		predecessor = Predecessor
-	}
-) ->
-	% Terrible network condition
-	NumQueries = maps:size(Queries),
-	RingSize = horde_ring:size(Ring),
-	LeftHorde = true
-		andalso NumQueries =:= 0
-		andalso RingSize =:= 0
-		andalso Successor =:= undefined
-		andalso Predecessor =:= undefined,
-	case LeftHorde of
-		true -> standalone;
-		false -> Status
-	end;
-join_status(#state{status = Status}) ->
-	Status.
-
-notify_join_status(#state{status = Status, join_waiters = Waiters} = State) ->
-	_ = [gen_server:reply(Waiter, Status =:= ready) || Waiter <- Waiters],
-	State#state{join_waiters = []}.
 
 check_ring(
 	#state{
@@ -758,6 +701,7 @@ maybe_remove_node(
 		predecessor = Predecessor
 	} = State
 ) ->
+	notify_watchers({remove_node, RemovedAddress}, State),
 	Ring2 = horde_ring:remove(overlay_address(RemovedAddress), Ring),
 	State2 = State#state{
 		ring = Ring2,
@@ -768,21 +712,52 @@ maybe_remove_node(
 		predecessor, horde_ring:predecessors(OwnAddress, 1, Ring2), State2
 	),
 	maybe_update_neighbour(
-		predecessor, horde_ring:successors(OwnAddress, 1, Ring2), State3
+		successor, horde_ring:successors(OwnAddress, 1, Ring2), State3
 	).
 
+notify_watchers(Msg, #state{watchers = Watchers}) ->
+	_ = [Pid ! {?MODULE, Ref, Msg} || {Ref, Pid} <- Watchers],
+	ok.
+
+extract_info(status, #state{
+	successor = Successor,
+	predecessor = Predecessor,
+	queries = Queries,
+	address = OwnAddress
+}) ->
+	case (Successor =/= undefined) and (Predecessor =/= undefined) of
+		true ->
+			SuccessorAddress = overlay_address(Successor),
+			PredecessorAddress = overlay_address(Predecessor),
+			QueryInfos = maps:values(Queries),
+			NoBetterNeighbours = lists:all(
+				fun(#query{destination = {compound, CompoundAddress}}) ->
+					OverlayAddress = overlay_address(CompoundAddress),
+					not is_better_successor(
+						OverlayAddress, OwnAddress, SuccessorAddress
+					) andalso not is_better_predecessor(
+						OverlayAddress, OwnAddress, PredecessorAddress
+					);
+				   (_) ->
+					true
+				end,
+				QueryInfos
+			),
+			case NoBetterNeighbours of
+				true -> joined;
+				false -> joining
+			end;
+		false ->
+			case maps:size(Queries) =:= 0 of
+				true -> standalone;
+				false -> joining
+			end
+	end;
 extract_info(queries, #state{queries = Queries}) ->
 	maps:map(fun(_, V) -> ?RECORD_TO_MAP(query, V) end, Queries);
-extract_info(status, #state{status = Status}) ->
-	case Status of
-		ready -> ready;
-		standalone -> standalone;
-		{joining, _} -> joining;
-		joining2 -> joining
-	end;
-extract_info(
-	address, #state{address = OverlayAddress, transport = Transport}
-) ->
+extract_info(address, #state{
+	address = OverlayAddress, transport = Transport
+}) ->
 	TransportAddress = horde_transport:info(Transport, address),
 	#{overlay => OverlayAddress, transport => TransportAddress};
 extract_info(What, State) ->

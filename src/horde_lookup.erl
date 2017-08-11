@@ -21,7 +21,7 @@
 	tracer :: horde_tracer:tracer(),
 	num_pending_queries = 0 :: non_neg_integer(),
 	next_resolvers = gb_trees:empty()
-		:: gb_trees:tree({non_neg_integer(), horde:endpoint()}, horde:endpoint()),
+		:: gb_trees:tree({integer(), horde:endpoint()}, horde:endpoint()),
 	queried_resolvers = sets:new() :: sets:set(horde:endpoint())
 }).
 
@@ -36,16 +36,17 @@ init(#{
 	sender := Sender,
 	address := Address,
 	max_address := MaxAddress,
-	num_parallel_queries := NumParallelQueries
+	num_parallel_queries := NumParallelQueries,
+	tracer := Tracer
 } = Opts) ->
-	Tracer = maps:get(tracer, Opts, horde_tracer:noop()),
+	horde_tracer:handle_event({start, Opts}, Tracer),
 	State = #state{
 		horde = Horde,
 		sender = Sender,
 		address = Address,
 		max_address = MaxAddress,
 		num_parallel_queries = NumParallelQueries,
-		tracer = horde_tracer:handle_event({start, Opts}, Tracer)
+		tracer = Tracer
 	},
 	{ok, State}.
 
@@ -60,10 +61,8 @@ handle_info(
 		num_pending_queries = NumPendingQueries
 	} = State
 ) ->
-	send_next_query(State#state{
-		num_pending_queries = NumPendingQueries - 1,
-		tracer = horde_tracer:handle_event({noreply, Ref}, Tracer)
-	});
+	horde_tracer:handle_event({noreply, Ref}, Tracer),
+	send_next_query(State#state{num_pending_queries = NumPendingQueries - 1});
 handle_info(
 	{horde, Ref, {reply, {peer_info, Peers}}},
 	#state{
@@ -73,19 +72,17 @@ handle_info(
 		tracer = Tracer
 	} = State
 ) ->
-	State2 = State#state{
-		num_pending_queries = NumPendingQueries - 1,
-		tracer = horde_tracer:handle_event(
-			{reply, #{reference => Ref, result => Peers}},
-			Tracer
-		)
-	},
+	horde_tracer:handle_event(
+		{reply, #{reference => Ref, result => Peers}},
+		Tracer
+	),
+	State2 = State#state{num_pending_queries = NumPendingQueries - 1},
 	case lookup_finished(OverlayAddress, Peers) of
 		{true, TransportAddress} ->
 			Result = {ok, TransportAddress},
-			Tracer2 = horde_tracer:handle_event({finish, Result}, Tracer),
+			horde_tracer:handle_event({finish, Result}, Tracer),
 			horde_utils:maybe_reply(horde, Sender, Result),
-			{stop, normal, State2#state{tracer = Tracer2}};
+			{stop, normal, State2};
 		false ->
 			Endpoints = [{compound, Address} || #{address := Address} <- Peers],
 			send_next_query(add_resolvers(Endpoints, State2))
@@ -167,9 +164,9 @@ send_next_query(
 	if
 		NumNextResolvers =:= 0, NumPendingQueries =:= 0 ->
 			% Nothing more we could do
-			Tracer2 = horde_tracer:handle_event({finish, error}, Tracer),
+			horde_tracer:handle_event({finish, error}, Tracer),
 			horde_utils:maybe_reply(horde, Sender, error),
-			{stop, normal, State#state{tracer = Tracer2}};
+			{stop, normal, State};
 		NumNextResolvers =:= 0, NumPendingQueries > 0 ->
 			% Wait for pending queries to finish
 			{noreply, State};
@@ -181,15 +178,14 @@ send_next_query(
 			{{Distance, _}, NextResolver, NextResolvers2} =
 				gb_trees:take_smallest(NextResolvers),
 			Ref = horde:send_query_async(Horde, NextResolver, {lookup, Address}),
+			QueryInfo = #{
+				reference => Ref,
+				endpoint => NextResolver,
+				distance => Distance
+			},
+			horde_tracer:handle_event({query, QueryInfo}, Tracer),
 			State2 = State#state{
 				next_resolvers = NextResolvers2,
-				tracer = horde_tracer:handle_event(
-					{query, #{
-						reference => Ref,
-						endpoint => NextResolver,
-						distance => Distance
-					}}, Tracer
-				),
 				num_pending_queries = NumPendingQueries + 1,
 				queried_resolvers = sets:add_element(NextResolver, QueriedResolvers)
 			},
