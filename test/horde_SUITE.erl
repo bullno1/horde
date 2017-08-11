@@ -39,7 +39,7 @@ no_self_join(_Config) ->
 props(_Config) ->
 	?assertEqual([], proper:module(horde_prop, [10000, {to_file, user}])).
 
-bootstrap() -> [{timetrap, 15000}].
+bootstrap() -> [{timetrap, 20000}].
 
 bootstrap(_Config) ->
 	NumNodes = 128,
