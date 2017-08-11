@@ -18,7 +18,7 @@ dep_ecoveralls = git https://github.com/nifoc/ecoveralls master
 ELVIS_VERSION ?= 0.2.12
 ELVIS_CONFIG_URL ?= https://github.com/inaka/elvis/releases/download/0.2.12/elvis.config
 
-CT_OPTS += -ct_hooks cth_readable_shell -cover ./test/cover.spec
+CT_OPTS += -ct_hooks cth_readable_shell
 
 include erlang.mk
 
@@ -27,5 +27,5 @@ include erlang.mk
 all:: rebar.config
 check:: elvis
 
-coverall: $(shell ls -1rt `find logs -type f -name \*.coverdata 2>/dev/null` | tail -n1)
-	$(gen_verbose) erl -noshell -pa ebin deps/*/ebin -eval 'ecoveralls:travis_ci("$?"), init:stop()'
+coverall: all.coverdata
+	$(gen_verbose) erl -noshell -pa ebin deps/*/ebin -eval 'ecoveralls:travis_ci("all.coverdata"), init:stop()'
